@@ -1,7 +1,13 @@
 // Volcano Sky Courier — tuning, palette and mission table.
 // A bush seaplane mail run over a volcanic Indonesian archipelago at golden hour.
 
-export const VIEW = { width: 1280, height: 720 };
+export const VIEW = { width: 1280, height: 720, ox: 0, oy: 0 };
+// VIEW.ox / VIEW.oy: the letterbox offset in view units, set by resize()
+// in main.js. On a viewport wider than 16:9 the 1280-wide game is centred
+// with side bars (ox > 0); on a taller one there are top/bottom bars
+// (oy > 0). The renderer draws the sky and sea across the full canvas
+// width (-ox .. 1280+ox) so wide screens read as one scene, not a framed
+// band with dead strips at the sides.
 export const HORIZON_Y = 268; // where sea meets sky on a 720-high frame
 export const STEP = 1 / 60;
 

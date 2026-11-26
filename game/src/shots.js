@@ -38,19 +38,29 @@ export function stageShot(name, world, audio) {
   if (shot === 'play') {
     // Mid-route: a couple of rings banked, the next ring dead ahead.
     flyFor(world, 3.5, audio);
-    // Nudge the next ring into the centre of the frame for the shot, and
-    // push the rings after it further out so they trail instead of piling up.
+    // Nudge the next ring into the centre of the frame for the shot.
     // The ring sits at the plane's altitude, so it frames the plane.
     const ring = world.nextRing();
     if (ring) { ring.z = 0.42; ring.x = world.plane.x + 0.05; ring.alt = world.plane.alt; }
+    // One trailing ring, far right and further out, so it reads as the
+    // route ahead; the rest are pushed beyond the draw range. With the
+    // gentler ring projection the follows no longer shrink to dots at
+    // the horizon, so leaving them at 0.68+ would pile them onto the
+    // next ring in the staged frame.
     let follow = 0;
     for (const r of world.rings) {
       if (r.hit || r.missed || r === ring) continue;
-      r.z = Math.max(r.z, 0.68 + follow * 0.16);
+      if (follow === 0) { r.z = 1.3; r.x = 0.55; r.alt = world.plane.alt; }
+      else r.z = 2.6;
       follow += 1;
     }
+    // One fuel ring, far left and higher, clear of the next ring; the
+    // other fuel rings and the ash clouds are hidden in the staged
+    // frame, or they pile onto the rings too.
     const fuel = world.fuelRings.find((f) => !f.taken);
-    if (fuel) { fuel.z = 0.62; fuel.x = world.plane.x - 0.45; fuel.alt = world.plane.alt + 900; }
+    if (fuel) { fuel.z = 0.9; fuel.x = world.plane.x - 0.75; fuel.alt = world.plane.alt + 1500; }
+    for (const f of world.fuelRings) { if (f !== fuel) f.taken = true; }
+    for (const hz of world.hazards) hz.hit = true;
     return 'play';
   }
   if (shot === 'deliver') {
@@ -60,10 +70,16 @@ export function stageShot(name, world, audio) {
     world.messages = [];
     const ring = world.nextRing();
     if (ring) { ring.z = 0.42; ring.x = 0.02; ring.alt = world.plane.alt; }
+    // Only the last ring shows: the rest of the route, the fuel rings
+    // and the ash clouds are hidden in the staged frame, or they pile
+    // onto the ring and bury the strip.
+    for (const r of world.rings) { if (r !== ring && !r.hit) r.z = 2.6; }
+    for (const f of world.fuelRings) f.taken = true;
+    for (const hz of world.hazards) hz.hit = true;
     world.plane.alt = 1050;
     world.plane.x = 0;
     world.cargo = true;
-    if (world.strip) world.strip.z = 0.30;
+    if (world.strip) world.strip.z = 0.12; // close enough that the lit runway shows under the plane
     world.addMessage('FINAL APPROACH — line up with the strip', '#ffd23d');
     return 'play';
   }

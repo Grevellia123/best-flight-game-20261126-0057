@@ -3,7 +3,7 @@
 // is picked up mid-route, and the run ends with a low pass over the island
 // strip. Fuel, hull and wind turn each sortie into decisions.
 
-import { FLIGHT, MISSIONS, SCORES, ISLANDS } from './config.js';
+import { FLIGHT, MISSIONS, SCORES, ISLANDS, HORIZON_Y, VIEW } from './config.js';
 import { makeRng, range } from './random.js';
 
 export const EVENT_NONE = 0;
@@ -19,12 +19,18 @@ const STRIP_LENGTH = 0.5;
 const ADVANCE_RATE = 0.12; // z-units per second at 140 kt: a mission lasts ~40 s
 const RESPAWN_Z = 0.55; // a missed ring comes back around this far ahead
 
-// Scenery stays out of the centre corridor (|x| < 0.55, volcanoes 0.85) so
-// no island ever overlaps the plane or the runway strip.
+// Scenery stays out of the centre corridor (|x| < 0.55), and volcanoes
+// stay much further out (|x| >= 1.35): a volcano cone is 150*s wide at
+// its base (314 px half-wide at the camera, size 1.15) and its screen
+// position slides toward the plane as the plane steers, so the old 0.85
+// still let a cone swallow the plane when the plane steered toward it.
+// At 1.35 the cone clears the plane even at full steering lock, with
+// margin — and volcanoGuard() below is the net for anything unexpected.
 function sceneryX(rng, kind) {
-  const min = kind === 'volcano' ? 0.85 : 0.55;
+  const min = kind === 'volcano' ? 1.35 : 0.55;
+  const max = kind === 'volcano' ? 1.75 : 1.6;
   const sign = rng() < 0.5 ? -1 : 1;
-  return sign * range(rng, min, 1.6);
+  return sign * range(rng, min, max);
 }
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -123,23 +129,61 @@ export function createWorld(seed = 1) {
       let ra = 3200;
       for (let i = 0; i < mission.rings; i += 1) {
         rx = clamp(rx + range(rng, -0.55, 0.55), -0.85, 0.85);
+        // Consecutive rings stay at least 0.4 apart sideways: far rings
+        // collapse toward the horizon in the projection, so rings with
+        // nearly the same x and altitude would draw on top of each other.
+        if (i > 0) {
+          const prev = this.rings[i - 1].x;
+          if (Math.abs(rx - prev) < 0.4) {
+            rx = clamp(prev + (rx >= prev ? 0.4 : -0.4), -0.85, 0.85);
+            if (Math.abs(rx - prev) < 0.4) rx = clamp(prev - Math.sign(rx - prev || 1) * 0.4, -0.85, 0.85);
+          }
+        }
         // Gentle altitude walk (±400 ft max between neighbours): the route
         // climbs and dives in smooth steps instead of porpoising ±1600 ft.
         ra = clamp(ra + range(rng, -400, 400), 1200, 6800);
         this.rings.push({ x: rx, alt: ra, z: 0.55 + i * RING_SPACING, hit: false, missed: false, id: i });
       }
+      // Fuel rings and hazards sit MIDWAY between mission rings in depth
+      // (never on top of one) and clear of their neighbours sideways and
+      // in altitude, so a green ring or an ash cloud never draws on top of
+      // a gold ring. Without this they spawned at nearly the same z as a
+      // mission ring (fuel 1.17 vs mission 1.25) and stacked into one blob.
+      const separated = (z, tries) => {
+        let x = 0, alt = 3200;
+        for (let t = 0; t < tries; t += 1) {
+          x = range(rng, -0.7, 0.7);
+          alt = range(rng, 1800, 5200);
+          let ok = true;
+          for (const r of this.rings) {
+            if (Math.abs(r.z - z) < 0.45 && Math.abs(r.x - x) < 0.5 && Math.abs(r.alt - alt) < 1000) { ok = false; break; }
+          }
+          if (ok) {
+            for (const f of this.fuelRings) {
+              if (Math.abs(f.z - z) < 0.45 && Math.abs(f.x - x) < 0.5 && Math.abs(f.alt - alt) < 1000) { ok = false; break; }
+            }
+          }
+          if (ok) {
+            for (const h of this.hazards) {
+              if (Math.abs(h.z - z) < 0.45 && Math.abs(h.x - x) < 0.5 && Math.abs(h.alt - alt) < 1000) { ok = false; break; }
+            }
+          }
+          if (ok) return { x, alt };
+        }
+        return { x, alt };
+      };
       this.fuelRings = [];
       for (let i = 0; i < 3; i += 1) {
-        this.fuelRings.push({
-          x: range(rng, -0.7, 0.7), alt: range(rng, 1800, 5200),
-          z: 0.75 + i * 0.42 + range(rng, 0, 0.1), taken: false,
-        });
+        const z = 0.55 + (i + 0.5) * RING_SPACING + range(rng, 0, 0.08);
+        const p = separated(z, 10);
+        this.fuelRings.push({ x: p.x, alt: p.alt, z, taken: false });
       }
       this.hazards = [];
       for (let i = 0; i < 3; i += 1) {
+        const z = 0.55 + (i + 0.5) * RING_SPACING + 0.18 + range(rng, 0, 0.08);
+        const p = separated(z, 10);
         this.hazards.push({
-          x: range(rng, -0.9, 0.9), alt: range(rng, 1500, 6000),
-          z: 0.7 + i * 0.45 + range(rng, 0, 0.15), r: range(rng, 0.12, 0.18), hit: false,
+          x: p.x, alt: p.alt, z, r: range(rng, 0.12, 0.18), hit: false,
         });
       }
       this.strip = { z: 0.55 + mission.rings * RING_SPACING + STRIP_LENGTH, landed: false };
@@ -205,6 +249,38 @@ export function createWorld(seed = 1) {
       if (this.hull <= 0) { this.hull = 0; this.screen = 'over'; }
     },
 
+    // Volcano keep-out: the plane must NEVER overlap a volcano cone or
+    // fly through one. This mirrors the renderer's projection (laneX,
+    // groundY, scaleAt) in world units: for each near volcano it checks
+    // whether the cone would cover the plane's screen box, and if so
+    // pushes the plane sideways to the nearest clear position. No damage,
+    // no bounce, no message — contact is simply impossible. With the
+    // 1.35 spawn margin this never fires in normal play; it is the net
+    // for anything unexpected (extreme sizes, recycled islands).
+    volcanoGuard() {
+      const p = this.plane;
+      const boxX0 = VIEW.width / 2 - 244, boxX1 = VIEW.width / 2 + 244; // plane 204 half-wide + 40 margin
+      const boxY0 = 372, boxY1 = 625; // flight band 378..526 and water band 471..619, with margin
+      for (const isl of this.islands) {
+        if (isl.kind !== 'volcano') continue;
+        const d = clamp(1 - isl.z, 0, 1);
+        if (d <= 0.45) continue; // too far: the cone base is still below the plane's band
+        const s = (0.12 + Math.pow(d, 1.6) * 1.7) * isl.size;
+        const gy = HORIZON_Y + d * d * 428;
+        if (gy - 210 * s > boxY1 || gy < boxY0) continue; // cone does not reach the plane's height
+        const f = 0.3 + 0.7 * d;
+        const half = 150 * s + 244; // cone base half-width + plane half-width + margin
+        const cx = VIEW.width / 2 + (isl.x - p.x * 0.35) * 620 * f;
+        if (Math.abs(cx - VIEW.width / 2) >= half) continue;
+        // Deflect: |isl.x - p.x * 0.35| must exceed half / (620 * f).
+        const need = half / (620 * f);
+        if (isl.x > 0) p.x = Math.min(p.x, (isl.x - need) / 0.35);
+        else p.x = Math.max(p.x, (isl.x + need) / 0.35);
+      }
+      p.x = clamp(p.x, -1.12, 1.12);
+      return { boxX0, boxX1, boxY0, boxY1 };
+    },
+
     step(dt, input, audio) {
       // --- Takeoff roll: the plane sits on the lagoon, throttles up, and
       // lifts off at rotation speed. The route waits ahead until airborne.
@@ -225,6 +301,8 @@ export function createWorld(seed = 1) {
           isl.z -= advance * 0.55;
           if (isl.z < 0.02) { isl.z = 1.05; isl.x = sceneryX(this.rng, isl.kind); }
         }
+        // The plane never overlaps a volcano cone, even on the water.
+        this.volcanoGuard();
         // Spray off the pontoons while still on the water.
         if (p.speed > 25 && this.lift < 0.6 && this.rng() < dt * 22) {
           this.particles.push({
@@ -276,6 +354,11 @@ export function createWorld(seed = 1) {
       p.pitch += (climb * 0.22 - p.pitch) * Math.min(1, dt * 5);
       p.alt += climb * dt * 1900 - (p.throttle < 0.25 ? dt * 260 : 0);
       p.alt = clamp(p.alt, 120, FLIGHT.maxAltitude);
+
+      // The plane never overlaps a volcano cone: deflect around any cone
+      // that would cover it (no damage — contact is impossible, see
+      // volcanoGuard()).
+      this.volcanoGuard();
 
       // Fuel burn: faster and thirstier at full throttle.
       const burn = (FLIGHT.fuelBurn + (p.throttle > 0.8 ? FLIGHT.fuelBurnBoost : 0)) * dt;

@@ -3,7 +3,7 @@
 // while the screen is 'play'. ?shot=start|play|deliver|end stages a fixed
 // scene for screenshots and freezes it.
 
-import { VIEW, PALETTE } from './config.js';
+import { VIEW, PALETTE, HORIZON_Y } from './config.js';
 import { createWorld } from './world.js';
 import { render, titleHit } from './render.js';
 import { createInput } from './input.js';
@@ -92,13 +92,34 @@ function resize() {
   const ox = (canvas.width - VIEW.width * scale) / 2;
   const oy = (canvas.height - VIEW.height * scale) / 2;
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
+  // The letterbox offset in VIEW units, so the renderer can paint the sky
+  // and sea across the full canvas (side bars on wide screens, top/bottom
+  // bars on portrait phones) instead of leaving dead strips.
+  VIEW.ox = ox / scale;
+  VIEW.oy = oy / scale;
+  // The same geometry in CSS pixels, for the DOM touch buttons: they sit
+  // just above the canvas throttle panel instead of on top of it.
+  const root = document.documentElement;
+  const scaleCss = scale / dpr;
+  root.style.setProperty('--band-ox', (ox / dpr) + 'px');
+  root.style.setProperty('--band-oy', (oy / dpr) + 'px');
+  root.style.setProperty('--band-scale', String(scaleCss));
   // Letterbox bars continue the scene instead of black: the sky gradient's
   // top colour above the frame, the sea's deep colour below it — so on a
   // portrait phone the whole screen reads as sky and sea, not black bars.
+  // On a wide screen the side bars get the same treatment, split at the
+  // horizon, until the first frame repaints them properly.
+  const oxU = ox / scale, oyU = oy / scale;
   ctx.fillStyle = PALETTE.skyTop;
-  ctx.fillRect(-ox / scale - 2, -oy / scale - 2, VIEW.width + ox / scale * 2 + 4, oy / scale + 2);
+  ctx.fillRect(-oxU - 2, -oyU - 2, VIEW.width + oxU * 2 + 4, oyU + 2);
   ctx.fillStyle = PALETTE.seaDeep;
-  ctx.fillRect(-ox / scale - 2, VIEW.height, VIEW.width + ox / scale * 2 + 4, oy / scale + 4);
+  ctx.fillRect(-oxU - 2, VIEW.height, VIEW.width + oxU * 2 + 4, oyU + 4);
+  ctx.fillStyle = PALETTE.skyTop;
+  ctx.fillRect(-oxU - 2, -oyU - 2, oxU + 2, VIEW.height + oyU * 2 + 4);
+  ctx.fillRect(VIEW.width, -oyU - 2, oxU + 2, VIEW.height + oyU * 2 + 4);
+  ctx.fillStyle = PALETTE.seaDeep;
+  ctx.fillRect(-oxU - 2, HORIZON_Y, oxU + 2, VIEW.height - HORIZON_Y + oyU + 2);
+  ctx.fillRect(VIEW.width, HORIZON_Y, oxU + 2, VIEW.height - HORIZON_Y + oyU + 2);
 }
 window.addEventListener('resize', resize);
 resize();

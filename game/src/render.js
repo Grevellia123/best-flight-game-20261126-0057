@@ -92,6 +92,113 @@ function laneX(world, x, z) {
 }
 function scaleAt(z) { const d = depthOf(z); return 0.12 + Math.pow(d, 1.6) * 1.7; }
 
+// Rings and hazards use a gentler depth falloff than the scenery: with the
+// plain depthOf() every ring beyond z = 1 collapses to the same horizon
+// spot (d = 0), so three rings in a row drew on top of each other. With
+// ringDepth() they fan out with distance instead — far rings read as the
+// route ahead, near rings stay big. Hit detection still uses world x/alt/z,
+// so this only changes where rings are drawn, never whether they count.
+function ringDepth(z) { return clamp(1 - z / 2.5, 0, 1); }
+function laneXAt(world, x, d) {
+  return VIEW.width / 2 + (x - world.plane.x * 0.35) * 620 * (0.3 + 0.7 * d);
+}
+function airYAt(world, alt, d) {
+  const rel = (alt - world.plane.alt) / 4200;
+  return (HORIZON_Y + d * 184) - rel * (120 + d * 260);
+}
+// Screen circle of a ring or hazard under the ring projection, for the
+// label layer's collision checks.
+function ringCircle(world, o, fuel) {
+  const d = ringDepth(o.z);
+  return {
+    x: laneXAt(world, o.x, d), y: airYAt(world, o.alt, d),
+    r: (30 + d * 150) * (fuel ? 0.8 : 1),
+  };
+}
+
+// The plane's screen box (VIEW coords), mirroring drawPlane: labels are
+// never drawn on top of the plane itself.
+function planeBox(world) {
+  const cx = VIEW.width / 2 + (world.screen === 'title' ? 180 : 0);
+  const onWater = world.screen === 'takeoff' || world.landed;
+  const cy = (onWater ? 545 - (world.lift || 0) * 93 : 452) + world.plane.pitch * 26;
+  return { x: cx - 204, y: cy - 74, w: 408, h: 148 };
+}
+
+// --- Deferred world labels -----------------------------------------------
+// Island / strip / hazard labels are collected while the world is drawn and
+// placed afterwards, in one pass, so a label can never sit under a ring or
+// a hazard, collide with another label, repeat a name, or run off the
+// frame. Labels live in the full viewport width (-ox .. 1280+ox), not just
+// the 1280 band, because on wide screens the scenery continues past it.
+function makeLabelLayer(ctx, circles, extraBlocked) {
+  const layer = {
+    ctx, circles: circles || [], placed: [], names: new Set(),
+    // HUD panels the labels must also stay clear of (VIEW coords).
+    blocked: [
+      { x: 36, y: 8, w: 200, h: 104 }, // gauges
+      { x: 268, y: 74, w: 380, h: 62 }, // mission banner
+      { x: 380, y: 8, w: 520, h: 60 }, // compass
+      { x: 1010, y: 14, w: 256, h: 110 }, // fuel / hull panel
+      { x: 14, y: 636, w: 240, h: 58 }, // throttle bar
+      { x: 880, y: 664, w: 386, h: 30 }, // hints pill
+      ...(extraBlocked || []),
+    ],
+    defer(text, x, y, fontPx, opts) {
+      this.list.push({ text, x, y, fontPx, ...(opts || {}) });
+    },
+    list: [],
+    placeAll() {
+      // Priority first (strip, then hazards, then islands), nearest first
+      // inside each group, so the closest label wins any contested spot.
+      const order = { strip: 0, hazard: 1, island: 2 };
+      this.list.sort((a, b) => (order[a.kind] - order[b.kind]) || (b.d - a.d));
+      for (const item of this.list) this.place(item);
+    },
+    place(item) {
+      const ctx = this.ctx;
+      const ox = VIEW.ox || 0;
+      const x0 = -ox, x1 = VIEW.width + ox;
+      if (item.name) {
+        if (this.names.has(item.name)) return false;
+      }
+      ctx.font = `bold ${item.fontPx}px sans-serif`;
+      const w = ctx.measureText(item.text).width;
+      const half = w / 2 + 8;
+      const x = clamp(item.x, x0 + half, x1 - half);
+      const y = clamp(item.y, 150, 648);
+      const rect = { x: x - half, y: y - item.fontPx, w: w + 16, h: item.fontPx + 10 };
+      for (const b of this.blocked) {
+        if (rect.x < b.x + b.w && rect.x + rect.w > b.x && rect.y < b.y + b.h && rect.y + rect.h > b.y) return false;
+      }
+      for (const p of this.placed) {
+        if (rect.x < p.x + p.w && rect.x + rect.w > p.x && rect.y < p.y + p.h && rect.y + rect.h > p.y) return false;
+      }
+      for (const c of this.circles) {
+        const nx = clamp(x, c.x - c.r, c.x + c.r);
+        const ny = clamp(y - item.fontPx / 2, c.y - c.r, c.y + c.r);
+        const dx = x - nx, dy = (y - item.fontPx / 2) - ny;
+        if (dx * dx + dy * dy < (c.r + 6) * (c.r + 6)) return false;
+      }
+      if (item.name) this.names.add(item.name);
+      this.placed.push(rect);
+      ctx.save();
+      if (item.pill) {
+        ctx.fillStyle = 'rgba(10, 14, 30, 0.82)';
+        roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8);
+        ctx.fill();
+      }
+      ctx.fillStyle = item.color || PALETTE.hudText;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(item.text, x, y - item.fontPx / 2 + 1);
+      ctx.restore();
+      return true;
+    },
+  };
+  return layer;
+}
+
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -103,13 +210,19 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 function drawSky(ctx, world) {
+  const ox = VIEW.ox || 0;
+  const oy = VIEW.oy || 0;
   const g = ctx.createLinearGradient(0, 0, 0, HORIZON_Y + 40);
   g.addColorStop(0, PALETTE.skyTop);
   g.addColorStop(0.55, PALETTE.skyMid);
   g.addColorStop(0.85, PALETTE.skyLow);
   g.addColorStop(1, PALETTE.horizonGlow);
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, VIEW.width, HORIZON_Y + 40);
+  // Full canvas width, not just the 1280 band: on a viewport wider than
+  // 16:9 the sky must continue into the side bars, or the frame reads as
+  // a band with dead strips. Extended past the top too so the shake
+  // translate never uncovers a raw edge.
+  ctx.fillRect(-ox - 8, -oy - 8, VIEW.width + 2 * ox + 16, HORIZON_Y + 48 + oy);
   // Low golden sun with halo — pinned to the sky, it never slides with
   // steering (a distant sun does not move when the plane banks).
   const sunX = 930;
@@ -125,11 +238,13 @@ function drawSky(ctx, world) {
   ctx.arc(sunX, sunY, 34, 0, Math.PI * 2);
   ctx.fill();
   // Slow clouds, tinted by the sunset. They drift LEFT as the plane flies
-  // forward — the same direction as the world below them.
+  // forward — the same direction as the world below them. They span the
+  // full canvas width so a wide screen has sky all the way across.
   ctx.fillStyle = 'rgba(255, 190, 150, 0.55)';
   const t = world.time * 6;
+  const span = VIEW.width + 2 * ox + 170;
   for (let i = 0; i < 7; i += 1) {
-    const cx = ((i * 211 - t * (4 + i)) % 1450 + 1450) % 1450 - 80;
+    const cx = ((i * 211 - t * (4 + i)) % span + span) % span - 85 - ox;
     const cy = 52 + (i % 3) * 46;
     const cw = 120 + (i % 3) * 60;
     ctx.beginPath();
@@ -139,12 +254,14 @@ function drawSky(ctx, world) {
 }
 
 function drawSea(ctx, world) {
+  const ox = VIEW.ox || 0;
   const g = ctx.createLinearGradient(0, HORIZON_Y, 0, VIEW.height);
   g.addColorStop(0, PALETTE.seaMid);
   g.addColorStop(0.5, '#0f4a68');
   g.addColorStop(1, PALETTE.seaDeep);
   ctx.fillStyle = g;
-  ctx.fillRect(0, HORIZON_Y, VIEW.width, VIEW.height - HORIZON_Y);
+  // Full canvas width, like the sky: the sea must reach the side bars too.
+  ctx.fillRect(-ox - 8, HORIZON_Y, VIEW.width + 2 * ox + 16, VIEW.height - HORIZON_Y + 8);
   // Sun glitter path on the water, kept tight under the pinned sun.
   ctx.fillStyle = 'rgba(255, 217, 138, 0.5)';
   for (let i = 0; i < 18; i += 1) {
@@ -159,7 +276,7 @@ function drawSea(ctx, world) {
   for (let i = 0; i < 12; i += 1) {
     const y = HORIZON_Y + 30 + i * 36;
     ctx.beginPath();
-    for (let x = 0; x <= VIEW.width; x += 40) {
+    for (let x = -ox; x <= VIEW.width + ox; x += 40) {
       const yy = y + Math.sin(x * 0.02 + world.time * 1.4 + i) * 3;
       if (x === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
     }
@@ -167,7 +284,7 @@ function drawSea(ctx, world) {
   }
 }
 
-function drawIsland(ctx, world, isl, onTitle) {
+function drawIsland(ctx, world, isl, onTitle, labels) {
   const d = depthOf(isl.z);
   if (d <= 0.02) return;
   const x = laneX(world, isl.x, isl.z);
@@ -210,11 +327,14 @@ function drawIsland(ctx, world, isl, onTitle) {
       ctx.arc(px, py, (16 + i * 9) * s, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.fillStyle = PALETTE.hudText;
-    ctx.font = `bold ${Math.max(11, Math.min(20, 15 * s))}px sans-serif`;
-    ctx.textAlign = 'center';
-    // On the title screen, never draw a label behind the menu panel.
-    if (d > 0.25 && d < 0.85 && !(onTitle && inTitlePanel(x, y - 250 * s, 80))) ctx.fillText(isl.name.toUpperCase(), x, y - 250 * s);
+    // The name goes through the deferred label layer: it is clamped
+    // inside the frame, kept off rings and hazards, and drawn once per
+    // name, so "PULAU API" can never run off the right edge or sit under
+    // an ash cloud. On the title screen, never draw a label behind the
+    // menu panel.
+    if (labels && d > 0.25 && d < 0.85 && !(onTitle && inTitlePanel(x, y - 250 * s, 80))) {
+      labels.defer(isl.name.toUpperCase(), x, y - 250 * s, Math.max(11, Math.min(20, 15 * s)), { kind: 'island', d, name: isl.name });
+    }
   } else {
     // Green island hump, sand rim, palms and village roofs.
     ctx.fillStyle = isl.hue === 'gold' ? '#6b7a2e' : isl.hue === 'teal' ? '#2e6b5d' : '#2e6b3a';
@@ -263,16 +383,15 @@ function drawIsland(ctx, world, isl, onTitle) {
       ctx.arc(px + 4 * s, y - 32 * s, 10 * s, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.fillStyle = PALETTE.hudText;
-    ctx.font = `bold ${Math.max(11, Math.min(20, 15 * s))}px sans-serif`;
-    ctx.textAlign = 'center';
-    // On the title screen, never draw a label behind the menu panel.
-    if (d > 0.3 && d < 0.85 && !(onTitle && inTitlePanel(x, y - 56 * s, 80))) ctx.fillText(isl.name.toUpperCase(), x, y - 56 * s);
+    // Name through the deferred label layer (see the volcano branch).
+    if (labels && d > 0.3 && d < 0.85 && !(onTitle && inTitlePanel(x, y - 56 * s, 80))) {
+      labels.defer(isl.name.toUpperCase(), x, y - 56 * s, Math.max(11, Math.min(20, 15 * s)), { kind: 'island', d, name: isl.name });
+    }
   }
   ctx.restore();
 }
 
-function drawStrip(ctx, world, onTitle, stripOverride, labelOverride) {
+function drawStrip(ctx, world, onTitle, stripOverride, labelOverride, labels) {
   const strip = stripOverride || world.strip;
   if (!strip) return;
   const d = depthOf(strip.z);
@@ -309,21 +428,23 @@ function drawStrip(ctx, world, onTitle, stripOverride, labelOverride) {
     ctx.beginPath(); ctx.arc(cx - lw, ly, 4 * s + 1, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(cx + lw, ly, 4 * s + 1, 0, Math.PI * 2); ctx.fill();
   }
-  ctx.fillStyle = '#2b2b33';
-  ctx.font = `bold ${Math.max(12, 18 * s)}px sans-serif`;
-  ctx.textAlign = 'center';
-  // On the title screen, never draw the runway label behind the menu panel.
+  // The runway name goes through the deferred label layer, on a dark
+  // pill: the old dark-on-pale text was unreadable once the strip shrank
+  // toward the horizon. On the title screen, never draw it behind the
+  // menu panel.
   const label = labelOverride || ('▸ RUNWAY — ' + world.mission().to.toUpperCase());
-  if (d > 0.2 && !(onTitle && inTitlePanel(cx, y - 108 * s, 130))) ctx.fillText(label, cx, y - 108 * s);
+  if (labels && d > 0.2 && !(onTitle && inTitlePanel(cx, y - 108 * s, 130))) {
+    labels.defer(label, cx, y - 108 * s, Math.max(12, 18 * s), { kind: 'strip', d, pill: true });
+  }
   ctx.restore();
 }
 
 function drawRing(ctx, world, ring, fuel, onTitle) {
-  const d = depthOf(ring.z);
+  const d = ringDepth(ring.z);
   // A missed ring stays visible: it circles back around and can be hit.
   if (d <= 0.02 || ring.hit || ring.taken) return;
-  const x = laneX(world, ring.x, ring.z);
-  const y = airY(world, ring.alt, ring.z);
+  const x = laneXAt(world, ring.x, d);
+  const y = airYAt(world, ring.alt, d);
   // Wide enough at the camera that the plane (296 px long) fits through
   // the hole: a hit now looks like flying through the ring.
   const r = (30 + d * 150) * (fuel ? 0.8 : 1);
@@ -332,7 +453,7 @@ function drawRing(ctx, world, ring, fuel, onTitle) {
   if (onTitle && circleHitsTitlePanel(x, y, r)) return;
   const pulse = 0.75 + Math.sin(world.time * 4 + ring.z * 20) * 0.25;
   ctx.save();
-  ctx.globalAlpha = 0.35 + d * 0.65;
+  ctx.globalAlpha = 0.30 + d * 0.70;
   ctx.strokeStyle = fuel ? PALETTE.ringGreen : PALETTE.ringGold;
   ctx.lineWidth = (fuel ? 6 : 9) + d * 5;
   ctx.shadowColor = fuel ? PALETTE.ringGreen : PALETTE.ringGold;
@@ -346,20 +467,21 @@ function drawRing(ctx, world, ring, fuel, onTitle) {
   ctx.beginPath();
   ctx.arc(x, y, r * 0.82, 0, Math.PI * 2);
   ctx.stroke();
-  // Chevrons pointing the way through.
+  // The inner mark rides above the centre, not in it: the plane flies
+  // through the hole, so a centred "FUEL"/"◉" would sit on the fuselage.
   ctx.fillStyle = fuel ? PALETTE.ringGreen : PALETTE.ringGold;
   ctx.font = `bold ${Math.max(13, Math.round(r * 0.42))}px sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(fuel ? 'FUEL' : '◉', x, y);
+  ctx.fillText(fuel ? 'FUEL' : '◉', x, y - r * 0.5);
   ctx.restore();
 }
 
-function drawHazard(ctx, world, hz, onTitle) {
-  const d = depthOf(hz.z);
+function drawHazard(ctx, world, hz, onTitle, labels) {
+  const d = ringDepth(hz.z);
   if (d <= 0.02 || hz.hit) return;
-  const x = laneX(world, hz.x, hz.z);
-  const y = airY(world, hz.alt, hz.z);
+  const x = laneXAt(world, hz.x, d);
+  const y = airYAt(world, hz.alt, d);
   const r = (30 + d * 130) * hz.r * 4;
   // Same as rings: hidden behind the title panel, label included.
   if (onTitle && circleHitsTitlePanel(x, y, r)) return;
@@ -373,12 +495,12 @@ function drawHazard(ctx, world, hz, onTitle) {
     ctx.arc(x + ox, y + oy, r * (0.45 + (i % 3) * 0.14), 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.fillStyle = '#ff5a4a';
-  ctx.font = `bold ${Math.max(12, Math.round(r * 0.28))}px sans-serif`;
-  ctx.textAlign = 'center';
-  // Keep the label below the HUD strip.
-  ctx.fillText('⚠ ASH', x, Math.max(y - r * 0.9, 196));
   ctx.restore();
+  // The warning goes through the deferred label layer, so it can never sit
+  // on top of a ring or run off the top of the frame.
+  if (labels) {
+    labels.defer('⚠ ASH', x, Math.max(y - r * 0.9, 196), Math.max(12, Math.round(r * 0.28)), { kind: 'hazard', d, color: '#ff5a4a' });
+  }
 }
 
 function drawPlane(ctx, world) {
@@ -699,7 +821,7 @@ function drawHud(ctx, world, audio, input) {
   // Damage flash.
   if (world.flash > 0) {
     ctx.fillStyle = `rgba(255, 60, 40, ${world.flash * 0.28})`;
-    ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+    ctx.fillRect(-(VIEW.ox || 0) - 8, -(VIEW.oy || 0) - 8, VIEW.width + 2 * (VIEW.ox || 0) + 16, VIEW.height + 2 * (VIEW.oy || 0) + 16);
   }
 }
 
@@ -790,7 +912,7 @@ function drawTitle(ctx, world, input, ui) {
   // keeps the map readable behind it, but nothing shows through the card.
   // No info rows at all — no Pilot, Aircraft, Status, Last Flight, Cargo.
   ctx.fillStyle = 'rgba(10, 14, 30, 0.10)';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+  ctx.fillRect(-(VIEW.ox || 0) - 8, -(VIEW.oy || 0) - 8, VIEW.width + 2 * (VIEW.ox || 0) + 16, VIEW.height + 2 * (VIEW.oy || 0) + 16);
   ctx.fillStyle = 'rgba(30, 16, 10, 0.35)';
   roundRect(ctx, TITLE_PANEL.x + 3, TITLE_PANEL.y + 8, TITLE_PANEL.w, TITLE_PANEL.h, 24); ctx.fill();
   ctx.fillStyle = '#4b2e23';
@@ -924,7 +1046,7 @@ function drawSettingsPanel(ctx, settings) {
 
 function drawPaused(ctx, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.6)';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+  ctx.fillRect(-(VIEW.ox || 0) - 8, -(VIEW.oy || 0) - 8, VIEW.width + 2 * (VIEW.ox || 0) + 16, VIEW.height + 2 * (VIEW.oy || 0) + 16);
   panel(ctx, 440, 250, 400, 200);
   ctx.save();
   ctx.textAlign = 'center';
@@ -940,7 +1062,7 @@ function drawPaused(ctx, input) {
 
 function drawDelivered(ctx, world, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.45)';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+  ctx.fillRect(-(VIEW.ox || 0) - 8, -(VIEW.oy || 0) - 8, VIEW.width + 2 * (VIEW.ox || 0) + 16, VIEW.height + 2 * (VIEW.oy || 0) + 16);
   panel(ctx, 360, 190, 560, 330);
   const m = world.mission();
   ctx.save();
@@ -971,7 +1093,7 @@ function drawDelivered(ctx, world, input) {
 
 function drawOver(ctx, world, input) {
   ctx.fillStyle = 'rgba(30, 8, 10, 0.55)';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+  ctx.fillRect(-(VIEW.ox || 0) - 8, -(VIEW.oy || 0) - 8, VIEW.width + 2 * (VIEW.ox || 0) + 16, VIEW.height + 2 * (VIEW.oy || 0) + 16);
   panel(ctx, 360, 200, 560, 320);
   ctx.save();
   ctx.textAlign = 'center';
@@ -995,7 +1117,7 @@ function drawOver(ctx, world, input) {
 
 function drawComplete(ctx, world, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.5)';
-  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
+  ctx.fillRect(-(VIEW.ox || 0) - 8, -(VIEW.oy || 0) - 8, VIEW.width + 2 * (VIEW.ox || 0) + 16, VIEW.height + 2 * (VIEW.oy || 0) + 16);
   panel(ctx, 330, 170, 620, 360);
   ctx.save();
   ctx.textAlign = 'center';
@@ -1029,18 +1151,42 @@ export function render(ctx, world, audio, input, ui) {
   const onTitle = world.screen === 'title';
   drawSky(ctx, world);
   drawSea(ctx, world);
+  // Ring/hazard screen circles for the label layer: labels must stay off
+  // them, so they are computed before anything is drawn.
+  const circles = [];
+  for (const o of world.rings) {
+    if (!o.hit && ringDepth(o.z) > 0.02) circles.push(ringCircle(world, o, false));
+  }
+  for (const o of world.fuelRings) {
+    if (!o.taken && ringDepth(o.z) > 0.02) circles.push(ringCircle(world, o, true));
+  }
+  for (const hz of world.hazards) {
+    if (!hz.hit && ringDepth(hz.z) > 0.02) {
+      const d = ringDepth(hz.z);
+      circles.push({ x: laneXAt(world, hz.x, d), y: airYAt(world, hz.alt, d), r: (30 + d * 130) * hz.r * 4 });
+    }
+  }
+  const labels = makeLabelLayer(ctx, circles, [planeBox(world)]);
   // Islands far to near so near ones overlap far ones.
   const sorted = [...world.islands].sort((a, b) => b.z - a.z);
-  for (const isl of sorted) drawIsland(ctx, world, isl, onTitle);
-  drawStrip(ctx, world, onTitle);
+  for (const isl of sorted) drawIsland(ctx, world, isl, onTitle, labels);
+  drawStrip(ctx, world, onTitle, null, null, labels);
   // On takeoff the plane is still on the home runway: draw the departure
   // strip under it (it scrolls past as the plane accelerates).
   if (world.screen === 'takeoff' && world.homeStripZ != null && world.homeStripZ > 0.02) {
-    drawStrip(ctx, world, onTitle, { z: world.homeStripZ }, '▸ ' + world.mission().from.toUpperCase());
+    drawStrip(ctx, world, onTitle, { z: world.homeStripZ }, '▸ ' + world.mission().from.toUpperCase(), labels);
   }
-  for (const hz of world.hazards) drawHazard(ctx, world, hz, onTitle);
-  for (const fr of world.fuelRings) drawRing(ctx, world, fr, true, onTitle);
-  for (const ring of world.rings) drawRing(ctx, world, ring, false, onTitle);
+  // Rings, fuel rings and hazards together, far to near: a near ring now
+  // always draws over a far one instead of the two piling into one blob.
+  const course = [
+    ...world.hazards.map((o) => ({ o, hz: true })),
+    ...world.fuelRings.map((o) => ({ o, fuel: true })),
+    ...world.rings.map((o) => ({ o })),
+  ].sort((a, b) => b.o.z - a.o.z);
+  for (const item of course) {
+    if (item.hz) drawHazard(ctx, world, item.o, onTitle, labels);
+    else drawRing(ctx, world, item.o, !!item.fuel, onTitle);
+  }
   // Particles behind the plane (off on Low quality).
   for (const pt of world.particles) {
     if (QUALITY === 'low') break;
@@ -1052,6 +1198,10 @@ export function render(ctx, world, audio, input, ui) {
   }
   ctx.globalAlpha = 1;
   drawPlane(ctx, world);
+  // World labels last, above the scenery and the rings but below the HUD,
+  // placed in one pass so they never overlap each other, a ring, a hazard,
+  // a HUD panel, or the frame edge.
+  labels.placeAll();
   drawHud(ctx, world, audio, input);
   if (world.screen === 'title') drawTitle(ctx, world, input, ui);
   else if (world.screen === 'paused') drawPaused(ctx, input);

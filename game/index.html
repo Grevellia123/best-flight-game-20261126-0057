@@ -16,8 +16,14 @@
      and gesture bars via the safe-area insets. */
   #touch-ui { position: fixed; inset: 0; z-index: 5; pointer-events: none; }
   #touch-ui .btn-group { position: absolute; display: flex; gap: 10px; pointer-events: none; }
-  #flight-btns { left: max(12px, env(safe-area-inset-left)); bottom: calc(max(96px, env(safe-area-inset-bottom) + 88px)); }
-  #sys-btns { right: max(12px, env(safe-area-inset-right)); bottom: calc(max(64px, env(safe-area-inset-bottom) + 56px)); }
+  /* The button rows sit just above the canvas throttle panel, wherever
+     the letterboxed game band is: --band-ox/--band-oy/--band-scale are
+     set by resize() in main.js (CSS px). The panel's top edge is at
+     636 view units, so the buttons anchor 10 CSS px above it — on a wide
+     desktop they no longer sit on top of the panel, and on a landscape
+     phone they clear the hints pill too. Safe-area insets still apply. */
+  #flight-btns { left: max(calc(var(--band-ox, 12px) + 12px), env(safe-area-inset-left)); bottom: max(calc(100dvh - var(--band-oy, 0px) - (636px * var(--band-scale, 1)) + 10px), calc(env(safe-area-inset-bottom, 0px) + 8px)); }
+  #sys-btns { right: max(calc(var(--band-ox, 12px) + 12px), env(safe-area-inset-right)); bottom: max(calc(100dvh - var(--band-oy, 0px) - (636px * var(--band-scale, 1)) + 10px), calc(env(safe-area-inset-bottom, 0px) + 8px)); }
   .ctl {
     pointer-events: auto; min-width: 52px; min-height: 52px; padding: 0 12px;
     border-radius: 14px; border: 2px solid rgba(255, 210, 61, 0.85);
@@ -34,9 +40,15 @@
     .ctl { min-width: 48px; min-height: 48px; font-size: 13px; padding: 0 8px; }
     .ctl.round { min-width: 48px; width: 48px; font-size: 20px; }
   }
-  /* Portrait phones play the same landscape game, scaled to fit the
-     width, with the sky and sea continuing into the bars above and below
-     it (see resize() in main.js) — no black bars, no rotate banner. */
+  /* Portrait phones: the game band is short and the plane sits in its
+     middle, so buttons anchored above the throttle panel would cover the
+     plane and the rings (the wrapped 2×2 grid is 106 px tall in a 59 px
+     gap). On portrait the bars above and below the band are tall, so the
+     buttons go back into the bottom bar, clear of the game entirely. */
+  @media (max-aspect-ratio: 1/1) {
+    #flight-btns { bottom: calc(max(96px, env(safe-area-inset-bottom) + 88px)); }
+    #sys-btns { bottom: calc(max(64px, env(safe-area-inset-bottom) + 56px)); }
+  }
   /* Screenshot scenes render the bare game: hide the DOM controls there. */
   body.shot-mode #touch-ui { display: none; }
   /* On the title screen the flight buttons do nothing (tap anywhere to fly)
