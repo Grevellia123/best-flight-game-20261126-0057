@@ -185,6 +185,8 @@ function frame(now) {
   }
   audio.setMood(moodFor());
   audio.update();
+  // The flight buttons stay hidden on the title screen (see index.html).
+  document.body.classList.toggle('on-title', world.screen === 'title');
   // The pause button shows ▶ while paused, ⏸ while flying.
   if (pauseBtn) {
     const label = world.screen === 'paused' ? '▶' : '⏸';

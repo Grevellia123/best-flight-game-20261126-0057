@@ -18,7 +18,11 @@ export function createInput(canvas) {
     mouseX: 0.5, // 0..1 across the canvas
     mouseActive: false,
     mouseDown: false,
-    isTouch: false, // set on the first touch; render switches hints to touch
+    // True from the start on touch-first devices (coarse pointer), so the
+    // title screen already shows tap wording before the first touch; set on
+    // the first touch anywhere else. Render switches hints to touch when true.
+    isTouch: typeof window !== 'undefined' && window.matchMedia
+      ? window.matchMedia('(pointer: coarse)').matches : false,
     pressedKeys: new Set(),
     onKey: null, // (code) => void, set by main.js for pause/mute/start
     onClick: null, // (x, y) => void, set by main.js for buttons

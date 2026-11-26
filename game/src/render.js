@@ -13,6 +13,25 @@ export const SCREEN_COMPLETE = 'complete';
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+// Title panel bounds (1280x720 view space): the start screen's left-side
+// menu card. World labels, rings and hazards that fall behind it are hidden
+// while the title overlay is up, so nothing bleeds through or gets clipped.
+const TITLE_PANEL = { x: 56, y: 120, w: 560, h: 470 };
+
+// True when the point (with a margin for label width) sits behind the panel.
+function inTitlePanel(x, y, pad) {
+  return x >= TITLE_PANEL.x - pad && x <= TITLE_PANEL.x + TITLE_PANEL.w + pad
+    && y >= TITLE_PANEL.y - pad && y <= TITLE_PANEL.y + TITLE_PANEL.h + pad;
+}
+
+// True when a circle (ring, hazard) overlaps the panel, margin included.
+function circleHitsTitlePanel(x, y, r) {
+  const nx = clamp(x, TITLE_PANEL.x, TITLE_PANEL.x + TITLE_PANEL.w);
+  const ny = clamp(y, TITLE_PANEL.y, TITLE_PANEL.y + TITLE_PANEL.h);
+  const dx = x - nx, dy = y - ny;
+  return dx * dx + dy * dy < (r + 6) * (r + 6);
+}
+
 // Depth: z 1 = far at the horizon, 0 = at the camera.
 function depthOf(z) { return clamp(1 - z, 0, 1); }
 function groundY(z) { const d = depthOf(z); return HORIZON_Y + d * d * 428; }
@@ -100,7 +119,7 @@ function drawSea(ctx, world) {
   }
 }
 
-function drawIsland(ctx, world, isl) {
+function drawIsland(ctx, world, isl, onTitle) {
   const d = depthOf(isl.z);
   if (d <= 0.02) return;
   const x = laneX(world, isl.x, isl.z);
@@ -146,7 +165,8 @@ function drawIsland(ctx, world, isl) {
     ctx.fillStyle = PALETTE.hudText;
     ctx.font = `bold ${Math.max(11, Math.min(20, 15 * s))}px sans-serif`;
     ctx.textAlign = 'center';
-    if (d > 0.25 && d < 0.85) ctx.fillText(isl.name.toUpperCase(), x, y - 250 * s);
+    // On the title screen, never draw a label behind the menu panel.
+    if (d > 0.25 && d < 0.85 && !(onTitle && inTitlePanel(x, y - 250 * s, 80))) ctx.fillText(isl.name.toUpperCase(), x, y - 250 * s);
   } else {
     // Green island hump, sand rim, palms and village roofs.
     ctx.fillStyle = isl.hue === 'gold' ? '#6b7a2e' : isl.hue === 'teal' ? '#2e6b5d' : '#2e6b3a';
@@ -198,12 +218,13 @@ function drawIsland(ctx, world, isl) {
     ctx.fillStyle = PALETTE.hudText;
     ctx.font = `bold ${Math.max(11, Math.min(20, 15 * s))}px sans-serif`;
     ctx.textAlign = 'center';
-    if (d > 0.3 && d < 0.85) ctx.fillText(isl.name.toUpperCase(), x, y - 56 * s);
+    // On the title screen, never draw a label behind the menu panel.
+    if (d > 0.3 && d < 0.85 && !(onTitle && inTitlePanel(x, y - 56 * s, 80))) ctx.fillText(isl.name.toUpperCase(), x, y - 56 * s);
   }
   ctx.restore();
 }
 
-function drawStrip(ctx, world) {
+function drawStrip(ctx, world, onTitle) {
   const strip = world.strip;
   if (!strip) return;
   const d = depthOf(strip.z);
@@ -243,16 +264,20 @@ function drawStrip(ctx, world) {
   ctx.fillStyle = '#2b2b33';
   ctx.font = `bold ${Math.max(12, 18 * s)}px sans-serif`;
   ctx.textAlign = 'center';
-  if (d > 0.2) ctx.fillText('▸ RUNWAY — ' + world.mission().to.toUpperCase(), cx, y - 108 * s);
+  // On the title screen, never draw the runway label behind the menu panel.
+  if (d > 0.2 && !(onTitle && inTitlePanel(cx, y - 108 * s, 130))) ctx.fillText('▸ RUNWAY — ' + world.mission().to.toUpperCase(), cx, y - 108 * s);
   ctx.restore();
 }
 
-function drawRing(ctx, world, ring, fuel) {
+function drawRing(ctx, world, ring, fuel, onTitle) {
   const d = depthOf(ring.z);
   if (d <= 0.02 || ring.hit || ring.missed || ring.taken) return;
   const x = laneX(world, ring.x, ring.z);
   const y = airY(world, ring.alt, ring.z);
   const r = (26 + d * 108) * (fuel ? 0.8 : 1);
+  // On the title screen, rings behind the menu panel are hidden outright —
+  // a glowing arc bleeding through the panel edge reads as a defect.
+  if (onTitle && circleHitsTitlePanel(x, y, r)) return;
   const pulse = 0.75 + Math.sin(world.time * 4 + ring.z * 20) * 0.25;
   ctx.save();
   ctx.globalAlpha = 0.35 + d * 0.65;
@@ -278,12 +303,14 @@ function drawRing(ctx, world, ring, fuel) {
   ctx.restore();
 }
 
-function drawHazard(ctx, world, hz) {
+function drawHazard(ctx, world, hz, onTitle) {
   const d = depthOf(hz.z);
   if (d <= 0.02 || hz.hit) return;
   const x = laneX(world, hz.x, hz.z);
   const y = airY(world, hz.alt, hz.z);
   const r = (30 + d * 130) * hz.r * 4;
+  // Same as rings: hidden behind the title panel, label included.
+  if (onTitle && circleHitsTitlePanel(x, y, r)) return;
   ctx.save();
   ctx.globalAlpha = 0.4 + d * 0.55;
   ctx.fillStyle = '#4a3a4a';
@@ -485,9 +512,10 @@ function drawHud(ctx, world, audio, input) {
   const p = world.plane;
   // Compass.
   compassStrip(ctx, world);
-  // Gauges: altitude left, speed right of it.
-  gauge(ctx, 78, 92, 46, 'ALT', p.alt, 9200, 'FT', '#ffd23d');
-  gauge(ctx, 196, 92, 46, 'SPD', p.speed, 200, 'KT', '#7dd8ff');
+  // Gauges, up in the top HUD band: their dials and labels end at y 108,
+  // clear of the title panel's top edge (y 120) and of the mission banner.
+  gauge(ctx, 78, 56, 36, 'ALT', p.alt, 9200, 'FT', '#ffd23d');
+  gauge(ctx, 190, 56, 36, 'SPD', p.speed, 200, 'KT', '#7dd8ff');
   // Mission banner (skipped on the title screen — the title panel says it).
   const mission = world.mission();
   if (world.screen !== 'title') {
@@ -555,27 +583,29 @@ function drawHud(ctx, world, audio, input) {
     ctx.fillText('COMBO ×' + world.combo, 1252, 170);
   }
   ctx.restore();
-  // Throttle bar, bottom left.
+  // Throttle bar, bottom left, and controls hint, bottom right: both end
+  // at y 694, a clean 26px above the frame edge, and clear of the title
+  // panel (bottom 590) and of the DOM touch buttons above them.
   ctx.save();
   ctx.fillStyle = PALETTE.hudPanel;
-  roundRect(ctx, 14, 640, 240, 58, 10); ctx.fill();
+  roundRect(ctx, 14, 636, 240, 58, 10); ctx.fill();
   ctx.strokeStyle = PALETTE.hudEdge;
   ctx.lineWidth = 1.5;
-  roundRect(ctx, 14, 640, 240, 58, 10); ctx.stroke();
+  roundRect(ctx, 14, 636, 240, 58, 10); ctx.stroke();
   ctx.fillStyle = PALETTE.hudText;
   ctx.font = 'bold 12px sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText('THROTTLE  ' + Math.round(p.throttle * 100) + '%', 28, 662);
+  ctx.fillText('THROTTLE  ' + Math.round(p.throttle * 100) + '%', 28, 658);
   ctx.fillStyle = 'rgba(255,255,255,0.18)';
-  roundRect(ctx, 28, 670, 212, 12, 6); ctx.fill();
+  roundRect(ctx, 28, 666, 212, 12, 6); ctx.fill();
   ctx.fillStyle = '#7dd8ff';
-  roundRect(ctx, 28, 670, 212 * p.throttle, 12, 6); ctx.fill();
+  roundRect(ctx, 28, 666, 212 * p.throttle, 12, 6); ctx.fill();
   ctx.restore();
   // Controls hint, bottom right: touch hints on touch devices, never
   // keyboard-only instructions on a phone.
   ctx.save();
   ctx.fillStyle = 'rgba(12, 18, 38, 0.55)';
-  roundRect(ctx, 880, 668, 386, 30, 8); ctx.fill();
+  roundRect(ctx, 880, 664, 386, 30, 8); ctx.fill();
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
@@ -583,7 +613,7 @@ function drawHud(ctx, world, audio, input) {
     input && input.isTouch
       ? 'Drag to steer · hold THR / CLIMB buttons · ⏸ pause · 🔊 mute'
       : 'A/D steer · W/S throttle · ↑/↓ climb · P pause · M ' + (audio && audio.muted ? 'unmute' : 'mute'),
-    1073, 687);
+    1073, 683);
   ctx.restore();
   // Floating messages, each on a dark pill so they read over bright rings.
   ctx.save();
@@ -609,8 +639,8 @@ function drawHud(ctx, world, audio, input) {
   }
 }
 
-function panel(ctx, x, y, w, h) {
-  ctx.fillStyle = 'rgba(10, 14, 30, 0.82)';
+function panel(ctx, x, y, w, h, alpha) {
+  ctx.fillStyle = `rgba(10, 14, 30, ${alpha ?? 0.82})`;
   roundRect(ctx, x, y, w, h, 16); ctx.fill();
   ctx.strokeStyle = PALETTE.hudEdge;
   ctx.lineWidth = 2;
@@ -618,9 +648,11 @@ function panel(ctx, x, y, w, h) {
 }
 
 function drawTitle(ctx, world, input) {
-  ctx.fillStyle = 'rgba(10, 14, 30, 0.35)';
+  // Stronger scrim plus a near-opaque panel: with labels and rings hidden
+  // behind it, the card reads as a clean solid surface, never a window.
+  ctx.fillStyle = 'rgba(10, 14, 30, 0.42)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
-  panel(ctx, 56, 120, 560, 470);
+  panel(ctx, TITLE_PANEL.x, TITLE_PANEL.y, TITLE_PANEL.w, TITLE_PANEL.h, 0.94);
   ctx.save();
   ctx.textAlign = 'left';
   ctx.fillStyle = PALETTE.ringGold;
@@ -756,15 +788,18 @@ export function render(ctx, world, audio, input) {
   if (world.shake > 0) {
     ctx.translate((Math.random() - 0.5) * world.shake * 14, (Math.random() - 0.5) * world.shake * 14);
   }
+  // On the title screen, world labels, rings and hazards that would sit
+  // behind the menu panel are hidden (see TITLE_PANEL above).
+  const onTitle = world.screen === 'title';
   drawSky(ctx, world);
   drawSea(ctx, world);
   // Islands far to near so near ones overlap far ones.
   const sorted = [...world.islands].sort((a, b) => b.z - a.z);
-  for (const isl of sorted) drawIsland(ctx, world, isl);
-  drawStrip(ctx, world);
-  for (const hz of world.hazards) drawHazard(ctx, world, hz);
-  for (const fr of world.fuelRings) drawRing(ctx, world, fr, true);
-  for (const ring of world.rings) drawRing(ctx, world, ring, false);
+  for (const isl of sorted) drawIsland(ctx, world, isl, onTitle);
+  drawStrip(ctx, world, onTitle);
+  for (const hz of world.hazards) drawHazard(ctx, world, hz, onTitle);
+  for (const fr of world.fuelRings) drawRing(ctx, world, fr, true, onTitle);
+  for (const ring of world.rings) drawRing(ctx, world, ring, false, onTitle);
   // Particles behind the plane.
   for (const pt of world.particles) {
     ctx.globalAlpha = Math.max(0, 1 - pt.t / pt.life);
