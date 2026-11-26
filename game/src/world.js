@@ -20,15 +20,27 @@ const ADVANCE_RATE = 0.12; // z-units per second at 140 kt: a mission lasts ~40 
 const RESPAWN_Z = 0.55; // a missed ring comes back around this far ahead
 
 // Scenery stays out of the centre corridor (|x| < 0.55), and volcanoes
-// stay much further out (|x| >= 1.35): a volcano cone is 150*s wide at
-// its base (314 px half-wide at the camera, size 1.15) and its screen
-// position slides toward the plane as the plane steers, so the old 0.85
-// still let a cone swallow the plane when the plane steered toward it.
-// At 1.35 the cone clears the plane even at full steering lock, with
-// margin — and volcanoGuard() below is the net for anything unexpected.
+// sit just outside the ring line (|x| in 1.10..1.25): the ring line runs
+// to |x| = 0.85, so a plane flying the rings stays clear, but a plane
+// that steers hard to the edge — the plane's steering clamp is |x| =
+// 1.12 — can reach a cone. The range was measured, not guessed: at
+// 0.9..1.2 (first attempt) the sim-v1 autopilot died on mission 2 at
+// plane.x = -0.59, squarely on the ring line — a size-1.08 cone at
+// x = -0.95, z = 0.49 grazed the plane's top corner by 16 px. The
+// cone's screen centre sits (isl.x - 0.35*plane.x)*620*f from the
+// plane, and its half-width at the plane's height reaches ~220 px,
+// so a cone nearer than ~1.1 can cover the ring line. A Monte Carlo
+// sweep over 24 seeds (~/workspace/makefun/sweep-volcano.mjs) picked
+// 1.10..1.25: autopilot tours 24/24 complete (worst clearance 4 px
+// over 144 missions, zero deaths) while a volcano-seeking bot dies
+// 21/24 times (median ~17 s). At 1.15..1.35 the seeker died only
+// 5/12 — the threat was decorative; at 1.05..1.25 an autopilot died.
+// Volcanoes are lethal: flying into one ends the run
+// (see volcanoHit()), so they must be reachable, not pushed out past
+// the plane's steering range the way they were before.
 function sceneryX(rng, kind) {
-  const min = kind === 'volcano' ? 1.35 : 0.55;
-  const max = kind === 'volcano' ? 1.75 : 1.6;
+  const min = kind === 'volcano' ? 1.10 : 0.55;
+  const max = kind === 'volcano' ? 1.20 : 1.6;
   const sign = rng() < 0.5 ? -1 : 1;
   return sign * range(rng, min, max);
 }
@@ -59,6 +71,7 @@ export function createWorld(seed = 1) {
     lowWarned: false,
     ditched: false,
     landing: null, // { speed, alt, sink, grade, pts } of the last touchdown
+    deathCause: null, // shown on the game-over panel, e.g. 'CRASHED INTO A VOLCANO!'
     pausedFrom: null, // screen to return to when unpausing
     rings: [],
     fuelRings: [],
@@ -96,6 +109,7 @@ export function createWorld(seed = 1) {
       this.lowWarned = false;
       this.ditched = false;
       this.landing = null;
+      this.deathCause = null;
       this.pausedFrom = null;
       this.time = 0;
       this.distance = 0;
@@ -200,9 +214,15 @@ export function createWorld(seed = 1) {
       this.islands = [];
       for (let i = 0; i < 14; i += 1) {
         const kind = table[i % table.length];
+        // Volcanoes never start in the danger window (z < 0.55): a cone
+        // already on top of the plane when play begins would kill with
+        // no chance to see or avoid it. They start far out and drift in
+        // like everything else, so the player always sees one coming.
+        let z = 0.12 + i * 0.075;
+        if (kind.kind === 'volcano' && z < 0.55) z = 0.55 + rng() * 0.35;
         this.islands.push({
           kind: kind.kind, name: kind.name, hue: kind.hue,
-          x: sceneryX(rng, kind.kind), z: 0.12 + i * 0.075, size: range(rng, 0.5, 1.15),
+          x: sceneryX(rng, kind.kind), z, size: range(rng, 0.5, 1.15),
           seed: Math.floor(rng() * 10000),
         });
       }
@@ -249,36 +269,41 @@ export function createWorld(seed = 1) {
       if (this.hull <= 0) { this.hull = 0; this.screen = 'over'; }
     },
 
-    // Volcano keep-out: the plane must NEVER overlap a volcano cone or
-    // fly through one. This mirrors the renderer's projection (laneX,
-    // groundY, scaleAt) in world units: for each near volcano it checks
-    // whether the cone would cover the plane's screen box, and if so
-    // pushes the plane sideways to the nearest clear position. No damage,
-    // no bounce, no message — contact is simply impossible. With the
-    // 1.35 spawn margin this never fires in normal play; it is the net
-    // for anything unexpected (extreme sizes, recycled islands).
-    volcanoGuard() {
+    // Volcanoes are lethal: flying into a cone ends the run instantly.
+    // The test mirrors the renderer's projection (laneX / groundY /
+    // scaleAt) and the cone's true drawn shape: a trapezoid, 150*s wide
+    // at the base narrowing to 34*s at the crater, against the plane's
+    // real screen box (408 x 148 around its flight height, see
+    // planeBox() in render.js). The old keep-out guard used the cone's
+    // full base width for the whole height band, which over-reports:
+    // the plane flies above the cone's wide base, so a cone that only
+    // brushes the plane's box edge on screen was counted as a hit and
+    // even the ring line (rings run to |x| = 0.85) could die. With the
+    // trapezoid test, the ring line stays clear and only a plane that
+    // steers into the cone itself dies. Returns the volcano island on
+    // a hit, null otherwise. No damage tick, no bounce, no deflect --
+    // a hit is instant death, whatever hull is left.
+    volcanoHit() {
       const p = this.plane;
-      const boxX0 = VIEW.width / 2 - 244, boxX1 = VIEW.width / 2 + 244; // plane 204 half-wide + 40 margin
-      const boxY0 = 372, boxY1 = 625; // flight band 378..526 and water band 471..619, with margin
+      const cy = 452 + p.pitch * 26; // plane's screen height in flight
+      const planeTop = cy - 74, planeBottom = cy + 74;
       for (const isl of this.islands) {
         if (isl.kind !== 'volcano') continue;
         const d = clamp(1 - isl.z, 0, 1);
-        if (d <= 0.45) continue; // too far: the cone base is still below the plane's band
+        if (d <= 0.45) continue; // too far: the cone top is still above the plane's band
         const s = (0.12 + Math.pow(d, 1.6) * 1.7) * isl.size;
         const gy = HORIZON_Y + d * d * 428;
-        if (gy - 210 * s > boxY1 || gy < boxY0) continue; // cone does not reach the plane's height
+        const coneTop = gy - 210 * s;
+        if (coneTop >= planeBottom || gy <= planeTop) continue; // no vertical overlap with the plane
+        // The cone is widest at the lowest point it shares with the
+        // plane's box: half-width falls 150*s -> 34*s from base to crater.
+        const yLow = Math.min(planeBottom, gy);
+        const wLow = 150 * s - (116 / 210) * (gy - yLow);
         const f = 0.3 + 0.7 * d;
-        const half = 150 * s + 244; // cone base half-width + plane half-width + margin
         const cx = VIEW.width / 2 + (isl.x - p.x * 0.35) * 620 * f;
-        if (Math.abs(cx - VIEW.width / 2) >= half) continue;
-        // Deflect: |isl.x - p.x * 0.35| must exceed half / (620 * f).
-        const need = half / (620 * f);
-        if (isl.x > 0) p.x = Math.min(p.x, (isl.x - need) / 0.35);
-        else p.x = Math.max(p.x, (isl.x + need) / 0.35);
+        if (Math.abs(cx - VIEW.width / 2) < wLow + 204) return isl;
       }
-      p.x = clamp(p.x, -1.12, 1.12);
-      return { boxX0, boxX1, boxY0, boxY1 };
+      return null;
     },
 
     step(dt, input, audio) {
@@ -301,8 +326,6 @@ export function createWorld(seed = 1) {
           isl.z -= advance * 0.55;
           if (isl.z < 0.02) { isl.z = 1.05; isl.x = sceneryX(this.rng, isl.kind); }
         }
-        // The plane never overlaps a volcano cone, even on the water.
-        this.volcanoGuard();
         // Spray off the pontoons while still on the water.
         if (p.speed > 25 && this.lift < 0.6 && this.rng() < dt * 22) {
           this.particles.push({
@@ -355,10 +378,23 @@ export function createWorld(seed = 1) {
       p.alt += climb * dt * 1900 - (p.throttle < 0.25 ? dt * 260 : 0);
       p.alt = clamp(p.alt, 120, FLIGHT.maxAltitude);
 
-      // The plane never overlaps a volcano cone: deflect around any cone
-      // that would cover it (no damage — contact is impossible, see
-      // volcanoGuard()).
-      this.volcanoGuard();
+      // Volcanoes are lethal, and only in play: a cone covering the
+      // plane's screen box ends the run instantly, whatever hull is
+      // left. The check runs once per frame after the islands move, and
+      // the screen flips to 'over', so it can never fire twice.
+      const volcano = this.volcanoHit();
+      if (volcano) {
+        this.hull = 0;
+        this.shake = 0.55;
+        this.flash = 0.5;
+        this.combo = 0;
+        this.deathCause = 'CRASHED INTO A VOLCANO!';
+        this.addMessage('CRASHED INTO A VOLCANO!', '#ff5a4a');
+        this.burst(640, 452, '#ff6a2a', 40);
+        if (audio) audio.crash();
+        this.screen = 'over';
+        return EVENT_OVER | EVENT_DAMAGE;
+      }
 
       // Fuel burn: faster and thirstier at full throttle.
       const burn = (FLIGHT.fuelBurn + (p.throttle > 0.8 ? FLIGHT.fuelBurnBoost : 0)) * dt;

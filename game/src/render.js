@@ -137,11 +137,15 @@ function makeLabelLayer(ctx, circles, extraBlocked) {
     // HUD panels the labels must also stay clear of (VIEW coords).
     blocked: [
       { x: 36, y: 8, w: 200, h: 104 }, // gauges
-      { x: 268, y: 74, w: 380, h: 62 }, // mission banner
+      { x: 14, y: 118, w: 380, h: 62 }, // mission banner (top-left column)
+      { x: 14, y: 190, w: 380, h: 34 }, // floating message pill (top-left column)
       { x: 380, y: 8, w: 520, h: 60 }, // compass
       { x: 1010, y: 14, w: 256, h: 110 }, // fuel / hull panel
       { x: 14, y: 636, w: 240, h: 58 }, // throttle bar
       { x: 880, y: 664, w: 386, h: 30 }, // hints pill
+      // Central forward corridor: the plane's path and the next ring.
+      // No world label may sit here — the centre belongs to flying.
+      { x: 400, y: 150, w: 480, h: 410 },
       ...(extraBlocked || []),
     ],
     defer(text, x, y, fontPx, opts) {
@@ -281,6 +285,23 @@ function drawSea(ctx, world) {
       if (x === 0) ctx.moveTo(x, yy); else ctx.lineTo(x, yy);
     }
     ctx.stroke();
+  }
+  // Streaming sea streaks: short dashes that rush backward past the
+  // plane, so the sea itself reads as forward motion. Their speed
+  // follows world.distance, which grows with airspeed. Off on the
+  // title screen, where the sea is a backdrop, not a runway.
+  if (world.screen !== 'title') {
+    ctx.strokeStyle = 'rgba(180, 225, 255, 0.14)';
+    ctx.lineWidth = 2;
+    const span = VIEW.width + 2 * ox + 120;
+    for (let i = 0; i < 13; i += 1) {
+      const y = HORIZON_Y + 44 + i * 32;
+      const x = (((-world.distance * 2.2 + i * 173) % span) + span) % span - ox - 60;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + 26, y);
+      ctx.stroke();
+    }
   }
 }
 
@@ -503,6 +524,33 @@ function drawHazard(ctx, world, hz, onTitle, labels) {
   }
 }
 
+function drawGuideLine(ctx, world) {
+  // Dashed guide line from just ahead of the plane's nose to the next
+  // ring: the flight path made visible, so the plane reads as travelling
+  // forward toward something, not parked in the middle. In play only,
+  // drawn under the rings and the plane; it stops at the ring's rim,
+  // never through its centre.
+  if (world.screen !== 'play') return;
+  const next = world.nextRing();
+  if (!next) return;
+  const c = ringCircle(world, next, false);
+  const sx = VIEW.width / 2 + 60;
+  const sy = 452 + world.plane.pitch * 26;
+  const dx = c.x - sx, dy = c.y - sy;
+  const len = Math.hypot(dx, dy);
+  if (len < 10) return;
+  const ex = c.x - (dx / len) * c.r, ey = c.y - (dy / len) * c.r;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 210, 61, 0.5)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([12, 10]);
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawPlane(ctx, world) {
   const p = world.plane;
   // On the title screen the plane sits right of the title panel, fully in
@@ -589,18 +637,36 @@ function drawPlane(ctx, world) {
   ctx.beginPath(); ctx.arc(-148, 0, 5, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#7dff9a';
   ctx.beginPath(); ctx.arc(148, -4, 5, 0, Math.PI * 2); ctx.fill();
+  // Exhaust trail: faint puffs streaming back from the tail, so the
+  // plane reads as travelling forward, not parked. In flight only.
+  if (world.screen === 'play' || world.screen === 'takeoff') {
+    for (let i = 0; i < 4; i += 1) {
+      const px = -185 - i * 34 - ((world.time * 140 * (0.5 + world.speedLines)) % 34);
+      const py = 8 + Math.sin(world.time * 3 + i * 1.7) * 5;
+      ctx.fillStyle = `rgba(200, 220, 235, ${(0.14 - i * 0.025).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(px, py, 6 + i * 2.5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
   ctx.restore();
-  // Speed lines at high speed (off on Low quality).
-  if (QUALITY !== 'low' && world.speedLines > 0.55) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+  // Speed streaks at high speed (off on Low quality): short lines
+  // radiating outward from the horizon centre, rushing away from the
+  // direction of travel — the world streaming past the plane. The old
+  // horizontal streaks drifted downward and read as rain. In flight
+  // only; they start clear of the plane and never cross it.
+  if (QUALITY !== 'low' && world.speedLines > 0.55
+    && (world.screen === 'play' || world.screen === 'takeoff')) {
+    const s01 = world.speedLines;
+    const ox = VIEW.ox || 0, oy = VIEW.oy || 0;
+    ctx.strokeStyle = `rgba(255,255,255,${(0.10 + 0.16 * s01).toFixed(3)})`;
     ctx.lineWidth = 2;
-    for (let i = 0; i < 10; i += 1) {
-      const y = 120 + ((i * 67 + world.time * 900) % 560);
-      const x = (i * 173) % VIEW.width;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + 60 + world.speedLines * 60, y);
-      ctx.stroke();
+    for (let i = 0; i < 12; i += 1) {
+      const a = (i / 12) * Math.PI * 2 + 0.26;
+      const r = 260 + ((i * 149 + world.time * 620 * (0.4 + s01)) % 620);
+      const x0 = 640 + Math.cos(a) * r, y0 = 268 + Math.sin(a) * r;
+      const len = 50 + 70 * s01;
+      const x1 = 640 + Math.cos(a) * (r + len), y1 = 268 + Math.sin(a) * (r + len);
+      if (x0 < -ox - 20 || x0 > VIEW.width + ox + 20 || y0 < -oy - 20 || y0 > VIEW.height + oy + 20) continue;
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
     }
   }
 }
@@ -697,30 +763,32 @@ function drawHud(ctx, world, audio, input) {
   // clear of the title panel's top edge (y 120) and of the mission banner.
   gauge(ctx, 78, 56, 36, 'ALT', p.alt, 9200, 'FT', '#ffd23d');
   gauge(ctx, 190, 56, 36, 'SPD', p.speed, 200, 'KT', '#7dd8ff');
-  // Mission banner (skipped on the title screen — the title panel says it).
+  // Mission banner, top-left column under the gauges (skipped on the
+  // title screen — the title panel says it). It used to sit top-centre,
+  // in the middle of the forward view, on top of the rings.
   const mission = world.mission();
   if (world.screen !== 'title') {
     ctx.save();
     ctx.fillStyle = PALETTE.hudPanel;
-    roundRect(ctx, 268, 74, 380, 62, 10); ctx.fill();
+    roundRect(ctx, 14, 118, 380, 62, 10); ctx.fill();
     ctx.strokeStyle = PALETTE.hudEdge;
     ctx.lineWidth = 1.5;
-    roundRect(ctx, 268, 74, 380, 62, 10); ctx.stroke();
+    roundRect(ctx, 14, 118, 380, 62, 10); ctx.stroke();
     ctx.fillStyle = PALETTE.ringGold;
     ctx.font = 'bold 13px sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText(`DAY ${mission.day}  ·  DELIVERY ${mission.id} / 6`, 282, 96);
+    ctx.fillText(`DAY ${mission.day}  ·  DELIVERY ${mission.id} / 6`, 28, 140);
     ctx.fillStyle = PALETTE.hudText;
     ctx.font = 'bold 17px sans-serif';
-    ctx.fillText(`${mission.from}  →  ${mission.to}`, 282, 118);
+    ctx.fillText(`${mission.from}  →  ${mission.to}`, 28, 162);
     ctx.fillStyle = PALETTE.hudDim;
     ctx.font = '12px sans-serif';
-    ctx.fillText(`Cargo: ${mission.cargo}   ·   Wind ${Math.round(mission.wind * 100)}%`, 282, 132);
-    // Ring progress dots.
+    ctx.fillText(`Cargo: ${mission.cargo}   ·   Wind ${Math.round(mission.wind * 100)}%`, 28, 176);
+    // Ring progress dots, top-right inside the banner.
     for (let i = 0; i < world.rings.length; i += 1) {
       const r = world.rings[i];
       ctx.fillStyle = r.hit ? PALETTE.ringGold : r.missed ? '#5a6478' : 'rgba(255,246,221,0.4)';
-      ctx.beginPath(); ctx.arc(652 - world.rings.length * 9 + i * 18, 96, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(384 - (world.rings.length - 1 - i) * 18, 140, 6, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
   }
@@ -797,25 +865,36 @@ function drawHud(ctx, world, audio, input) {
       : 'A/D steer · W/S throttle · ↑/↓ climb · P pause · M ' + (audio && audio.muted ? 'unmute' : 'mute'),
     1073, 683);
   ctx.restore();
-  // Floating message — one line at a time, on a dark pill so it reads over
-  // bright rings. The world queues messages; only the head is drawn, and
-  // only while flying: on the delivered / over / complete panels the message
-  // would sit half-hidden behind the panel (it freezes when play stops).
+  // Floating message — one line at a time, on a dark pill in the
+  // top-left column under the mission banner, so it reads over the sky
+  // at the edge instead of the rings. It used to sit centred at y 190,
+  // in the middle of the forward view. The font shrinks for long
+  // messages so the pill never reaches past the banner's right edge
+  // (x 394) into the forward corridor. Only the head of the queue is
+  // drawn, and only while flying: on the delivered / over / complete
+  // panels the message would sit half-hidden behind the panel (it
+  // freezes when play stops).
   ctx.save();
-  ctx.textAlign = 'center';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
   if ((world.screen === 'play' || world.screen === 'takeoff') && world.messages.length > 0) {
     const m = world.messages[0];
     const alpha = clamp(1 - m.t / 2.2, 0, 1);
-    const y = 190;
+    let fontPx = 21;
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    let w = ctx.measureText(m.text).width + 28;
+    while (w > 380 && fontPx > 15) {
+      fontPx -= 1;
+      ctx.font = `bold ${fontPx}px sans-serif`;
+      w = ctx.measureText(m.text).width + 28;
+    }
     ctx.globalAlpha = alpha * 0.78;
-    ctx.font = 'bold 21px sans-serif';
-    const w = ctx.measureText(m.text).width + 28;
     ctx.fillStyle = 'rgba(10, 14, 30, 0.85)';
-    roundRect(ctx, VIEW.width / 2 - w / 2, y - 24, w, 32, 9);
+    roundRect(ctx, 14, 192, w, 32, 9);
     ctx.fill();
     ctx.globalAlpha = alpha;
     ctx.fillStyle = m.color;
-    ctx.fillText(m.text, VIEW.width / 2, y);
+    ctx.fillText(m.text, 28, 209);
   }
   ctx.restore();
   // Damage flash.
@@ -1102,7 +1181,7 @@ function drawOver(ctx, world, input) {
   ctx.fillText('✕ SORTIE LOST', 640, 268);
   ctx.fillStyle = PALETTE.hudText;
   ctx.font = '18px sans-serif';
-  ctx.fillText('The courier is down — but the mail must go through.', 640, 308);
+  ctx.fillText(world.deathCause || 'The courier is down — but the mail must go through.', 640, 308);
   ctx.font = '17px sans-serif';
   ctx.fillStyle = PALETTE.hudDim;
   ctx.fillText(`Score ${world.score.toLocaleString()}  ·  Deliveries ${world.deliveries}/6  ·  Rings ${world.ringsHit}`, 640, 342);
@@ -1111,7 +1190,7 @@ function drawOver(ctx, world, input) {
   ctx.fillText(`▶  ${cta(input)} — FLY AGAIN`, 640, 404);
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '14px sans-serif';
-  ctx.fillText('Tip: green rings are fuel. Ash clouds cost a hull.', 640, 440);
+  ctx.fillText('Tip: green rings are fuel. Ash clouds cost a hull. Volcanoes are lethal — steer clear.', 640, 440);
   ctx.restore();
 }
 
@@ -1187,6 +1266,8 @@ export function render(ctx, world, audio, input, ui) {
     if (item.hz) drawHazard(ctx, world, item.o, onTitle, labels);
     else drawRing(ctx, world, item.o, !!item.fuel, onTitle);
   }
+  // Guide line to the next ring, under the rings and the plane.
+  drawGuideLine(ctx, world);
   // Particles behind the plane (off on Low quality).
   for (const pt of world.particles) {
     if (QUALITY === 'low') break;
