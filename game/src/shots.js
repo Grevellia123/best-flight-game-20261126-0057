@@ -40,8 +40,9 @@ export function stageShot(name, world, audio) {
     flyFor(world, 3.5, audio);
     // Nudge the next ring into the centre of the frame for the shot, and
     // push the rings after it further out so they trail instead of piling up.
+    // The ring sits at the plane's altitude, so it frames the plane.
     const ring = world.nextRing();
-    if (ring) { ring.z = 0.42; ring.x = world.plane.x + 0.05; ring.alt = world.plane.alt + 350; }
+    if (ring) { ring.z = 0.42; ring.x = world.plane.x + 0.05; ring.alt = world.plane.alt; }
     let follow = 0;
     for (const r of world.rings) {
       if (r.hit || r.missed || r === ring) continue;
@@ -58,7 +59,7 @@ export function stageShot(name, world, audio) {
     flyFor(world, 4, audio);
     world.messages = [];
     const ring = world.nextRing();
-    if (ring) { ring.z = 0.42; ring.x = 0.02; ring.alt = 1150; }
+    if (ring) { ring.z = 0.42; ring.x = 0.02; ring.alt = world.plane.alt; }
     world.plane.alt = 1050;
     world.plane.x = 0;
     world.cargo = true;

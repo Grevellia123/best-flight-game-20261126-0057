@@ -14,8 +14,18 @@ export const EVENT_DAMAGE = 8;
 export const EVENT_OVER = 16;
 export const EVENT_FUEL = 32;
 
-const RING_SPACING = 0.16; // z-distance between rings (z runs 1 far -> 0 here)
+const RING_SPACING = 0.7; // z-distance between rings (z runs 1 far -> 0 here)
 const STRIP_LENGTH = 0.5;
+const ADVANCE_RATE = 0.12; // z-units per second at 140 kt: a mission lasts ~40 s
+const RESPAWN_Z = 0.55; // a missed ring comes back around this far ahead
+
+// Scenery stays out of the centre corridor (|x| < 0.55, volcanoes 0.85) so
+// no island ever overlaps the plane or the runway strip.
+function sceneryX(rng, kind) {
+  const min = kind === 'volcano' ? 0.85 : 0.55;
+  const sign = rng() < 0.5 ? -1 : 1;
+  return sign * range(rng, min, 1.6);
+}
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -31,9 +41,19 @@ export function createWorld(seed = 1) {
     bestCombo: 0,
     deliveries: 0,
     perfectRuns: 0,
-    plane: { x: 0, alt: 2400, heading: 0, throttle: 0.55, bank: 0, pitch: 0, speed: FLIGHT.cruiseSpeed },
+    plane: { x: 0, alt: 2400, heading: 0, throttle: 0.55, bank: 0, pitch: 0, speed: FLIGHT.cruiseSpeed, vs: 0 },
     fuel: FLIGHT.startFuel,
     hull: FLIGHT.startHull,
+    maxHull: FLIGHT.maxHull,
+    invuln: 0, // seconds of post-hit protection (wave strikes, ash)
+    lift: 1, // takeoff lift 0 (on the water) -> 1 (airborne)
+    landed: false, // sitting on the water after a touchdown
+    homeStripZ: null, // the departure runway, drawn under the plane on takeoff
+    approachWarned: false,
+    lowWarned: false,
+    ditched: false,
+    landing: null, // { speed, alt, sink, grade, pts } of the last touchdown
+    pausedFrom: null, // screen to return to when unpausing
     rings: [],
     fuelRings: [],
     hazards: [],
@@ -62,16 +82,37 @@ export function createWorld(seed = 1) {
       this.cargo = false;
       this.fuel = FLIGHT.startFuel;
       this.hull = FLIGHT.startHull;
+      this.invuln = 0;
+      this.lift = 1;
+      this.landed = false;
+      this.homeStripZ = null;
+      this.approachWarned = false;
+      this.lowWarned = false;
+      this.ditched = false;
+      this.landing = null;
+      this.pausedFrom = null;
       this.time = 0;
       this.distance = 0;
       this.shake = 0;
       this.flash = 0;
       this.messages = [];
       this.particles = [];
-      this.plane = { x: 0, alt: 2400, heading: 0, throttle: 0.55, bank: 0, pitch: 0, speed: FLIGHT.cruiseSpeed };
+      this.plane = { x: 0, alt: 2400, heading: 0, throttle: 0.55, bank: 0, pitch: 0, speed: FLIGHT.cruiseSpeed, vs: 0 };
       this.wind = this.mission().wind;
       this.buildRoute();
       this.buildScenery();
+    },
+
+    // Line up on the water for a takeoff roll: the plane starts at rest on
+    // the lagoon by the home strip, lifts off at rotation speed, and only
+    // then does the route start moving. Called for every mission, so each
+    // delivery begins with a takeoff and ends with a landing.
+    startTakeoff() {
+      this.plane = { x: 0, alt: 380, heading: 0, throttle: 0.35, bank: 0, pitch: 0, speed: 0, vs: 0 };
+      this.lift = 0;
+      this.landed = false;
+      this.homeStripZ = 0.14;
+      this.screen = 'takeoff';
     },
 
     buildRoute() {
@@ -82,7 +123,9 @@ export function createWorld(seed = 1) {
       let ra = 3200;
       for (let i = 0; i < mission.rings; i += 1) {
         rx = clamp(rx + range(rng, -0.55, 0.55), -0.85, 0.85);
-        ra = clamp(ra + range(rng, -1600, 1600), 1200, 6800);
+        // Gentle altitude walk (±400 ft max between neighbours): the route
+        // climbs and dives in smooth steps instead of porpoising ±1600 ft.
+        ra = clamp(ra + range(rng, -400, 400), 1200, 6800);
         this.rings.push({ x: rx, alt: ra, z: 0.55 + i * RING_SPACING, hit: false, missed: false, id: i });
       }
       this.fuelRings = [];
@@ -93,10 +136,10 @@ export function createWorld(seed = 1) {
         });
       }
       this.hazards = [];
-      for (let i = 0; i < 5; i += 1) {
+      for (let i = 0; i < 3; i += 1) {
         this.hazards.push({
           x: range(rng, -0.9, 0.9), alt: range(rng, 1500, 6000),
-          z: 0.7 + i * 0.3 + range(rng, 0, 0.15), r: range(rng, 0.16, 0.24), hit: false,
+          z: 0.7 + i * 0.45 + range(rng, 0, 0.15), r: range(rng, 0.12, 0.18), hit: false,
         });
       }
       this.strip = { z: 0.55 + mission.rings * RING_SPACING + STRIP_LENGTH, landed: false };
@@ -115,14 +158,16 @@ export function createWorld(seed = 1) {
         const kind = table[i % table.length];
         this.islands.push({
           kind: kind.kind, name: kind.name, hue: kind.hue,
-          x: range(rng, -1.6, 1.6), z: 0.12 + i * 0.075, size: range(rng, 0.5, 1.15),
+          x: sceneryX(rng, kind.kind), z: 0.12 + i * 0.075, size: range(rng, 0.5, 1.15),
           seed: Math.floor(rng() * 10000),
         });
       }
     },
 
     nextRing() {
-      for (const r of this.rings) if (!r.hit && !r.missed) return r;
+      // A missed ring stays in play (it circles back around), so the next
+      // ring is simply the first one not yet hit.
+      for (const r of this.rings) if (!r.hit) return r;
       return null;
     },
     speedKt() { return Math.round(this.plane.speed); },
@@ -137,16 +182,18 @@ export function createWorld(seed = 1) {
       return this.ringsHit / total;
     },
 
+    // Messages queue up and show one at a time (see step: only the head of
+    // the queue ages), so they can never pile up over the HUD.
     addMessage(text, color) {
       this.messages.push({ text, color: color || '#fff6dd', t: 0 });
-      if (this.messages.length > 4) this.messages.shift();
+      if (this.messages.length > 3) this.messages.shift();
     },
     burst(x, y, color, n) {
       for (let i = 0; i < n; i += 1) {
         if (this.particles.length > 220) return;
-        const a = Math.random() * Math.PI * 2;
-        const s = 40 + Math.random() * 160;
-        this.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: 0.7 + Math.random() * 0.5, t: 0, color, size: 2 + Math.random() * 4 });
+        const a = this.rng() * Math.PI * 2;
+        const s = 40 + this.rng() * 160;
+        this.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: 0.7 + this.rng() * 0.5, t: 0, color, size: 2 + this.rng() * 4 });
       }
     },
     damage(amount, why) {
@@ -159,6 +206,49 @@ export function createWorld(seed = 1) {
     },
 
     step(dt, input, audio) {
+      // --- Takeoff roll: the plane sits on the lagoon, throttles up, and
+      // lifts off at rotation speed. The route waits ahead until airborne.
+      if (this.screen === 'takeoff') {
+        this.time += dt;
+        const p = this.plane;
+        let events = EVENT_NONE;
+        // Auto-throttle toward takeoff power; the player can still pull back.
+        p.throttle = clamp(p.throttle + input.throttleDelta() * dt * 0.45, 0, 1);
+        p.throttle += (0.9 - p.throttle) * Math.min(1, dt * 0.8);
+        const targetSpeed = FLIGHT.minSpeed + (FLIGHT.maxSpeed - FLIGHT.minSpeed) * p.throttle;
+        p.speed += (targetSpeed - p.speed) * Math.min(1, dt * 0.8);
+        // Water run: the home strip scrolls past under the plane.
+        const advance = (p.speed / 140) * dt * ADVANCE_RATE;
+        this.distance += p.speed * dt;
+        if (this.homeStripZ != null) this.homeStripZ -= advance;
+        for (const isl of this.islands) {
+          isl.z -= advance * 0.55;
+          if (isl.z < 0.02) { isl.z = 1.05; isl.x = sceneryX(this.rng, isl.kind); }
+        }
+        // Spray off the pontoons while still on the water.
+        if (p.speed > 25 && this.lift < 0.6 && this.rng() < dt * 22) {
+          this.particles.push({
+            x: 540 + this.rng() * 90, y: 600,
+            vx: -60 - this.rng() * 90, vy: -40 - this.rng() * 70,
+            life: 0.5, t: 0, color: '#cfe8ff', size: 2 + this.rng() * 3,
+          });
+        }
+        // Rotation speed: lift off and climb away.
+        if (p.speed >= 95) {
+          this.lift = Math.min(1, this.lift + dt / 1.4);
+          p.alt = 380 + this.lift * 820;
+          p.pitch = this.lift * 0.14;
+          if (this.lift >= 1 && p.speed >= 125) {
+            this.screen = 'play';
+            this.homeStripZ = null;
+            this.addMessage('AIRBORNE — fly the golden rings!', '#7dff9a');
+          }
+        }
+        for (const pt of this.particles) { pt.t += dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 120 * dt; }
+        this.particles = this.particles.filter((pt) => pt.t < pt.life);
+        if (audio) audio.setThrottle(p.throttle, (p.speed - FLIGHT.minSpeed) / (FLIGHT.maxSpeed - FLIGHT.minSpeed));
+        return events;
+      }
       if (this.screen !== 'play') return EVENT_NONE;
       this.time += dt;
       const p = this.plane;
@@ -180,32 +270,41 @@ export function createWorld(seed = 1) {
         this.addMessage('EDGE OF THE CORRIDOR — steer back!', '#ffb347');
       }
 
-      // Climb and descend.
+      // Climb and descend. Vertical speed is tracked for landing quality.
       const climb = input.climb();
+      p.vs = climb * 1900;
       p.pitch += (climb * 0.22 - p.pitch) * Math.min(1, dt * 5);
       p.alt += climb * dt * 1900 - (p.throttle < 0.25 ? dt * 260 : 0);
-      p.alt = clamp(p.alt, 380, FLIGHT.maxAltitude);
+      p.alt = clamp(p.alt, 120, FLIGHT.maxAltitude);
 
       // Fuel burn: faster and thirstier at full throttle.
       const burn = (FLIGHT.fuelBurn + (p.throttle > 0.8 ? FLIGHT.fuelBurnBoost : 0)) * dt;
       this.fuel = Math.max(0, this.fuel - burn);
       if (this.fuel <= 0) {
         p.throttle = Math.max(0, p.throttle - dt * 0.4);
-        if (p.alt <= 520) { this.damage(3, 'OUT OF FUEL — ditched in the sea!'); return EVENT_OVER | EVENT_DAMAGE; }
+        // Out of fuel over the sea: one ditch, not a damage tick per frame.
+        if (p.alt <= 520 && !this.ditched) {
+          this.ditched = true;
+          this.damage(6, 'OUT OF FUEL — ditched in the sea!');
+          return EVENT_OVER | EVENT_DAMAGE;
+        }
       }
 
       // Forward motion: everything ahead comes closer.
-      const advance = (p.speed / 140) * dt * 0.24;
+      const advance = (p.speed / 140) * dt * ADVANCE_RATE;
       this.distance += p.speed * dt;
       for (const isl of this.islands) {
         isl.z -= advance * 0.55;
-        if (isl.z < 0.02) { isl.z = 1.05; isl.x = (this.rng() * 3.2 - 1.6); }
+        if (isl.z < 0.02) { isl.z = 1.05; isl.x = sceneryX(this.rng, isl.kind); }
       }
       const moveSet = (list) => { for (const o of list) o.z -= advance; };
 
-      // Rings: pass through the centre for points and combo.
+      // Rings: pass through the centre for points and combo. A missed ring
+      // is NOT lost forever — it circles back around ahead of the plane, so
+      // a mission can never soft-lock. Missing still costs the combo and
+      // the perfect-run bonus.
       for (const ring of this.rings) {
-        if (ring.hit || ring.missed) continue;
+        if (ring.hit) continue;
         ring.z -= advance;
         if (ring.z <= 0) {
           const dx = Math.abs(ring.x - p.x);
@@ -233,7 +332,13 @@ export function createWorld(seed = 1) {
             ring.missed = true;
             this.ringsMissed += 1;
             this.combo = 0;
-            this.addMessage('RING MISSED — combo lost', '#b9c4d6');
+            this.addMessage('RING MISSED — it circles back around!', '#b9c4d6');
+            // Back of the queue: behind every ring still ahead of the plane.
+            let z = RESPAWN_Z;
+            for (const r of this.rings) {
+              if (r !== ring && !r.hit) z = Math.max(z, r.z + 0.3);
+            }
+            ring.z = z;
           }
         }
       }
@@ -255,9 +360,12 @@ export function createWorld(seed = 1) {
       for (const hz of this.hazards) {
         if (hz.hit) continue;
         if (hz.z <= 0.02 && hz.z > -0.05) {
-          if (Math.abs(hz.x - p.x) < hz.r && Math.abs(hz.alt - p.alt) < 1400) {
+          if (Math.abs(hz.x - p.x) < hz.r && Math.abs(hz.alt - p.alt) < 1000) {
             hz.hit = true;
-            this.damage(1, 'ASH CLOUD! Hull -1');
+            if (this.invuln <= 0) {
+              this.damage(1, 'ASH CLOUD! Hull -1');
+              this.invuln = 1.5; // brief protection so one cloud can't chain hits
+            }
             if (audio) audio.crash();
             events |= EVENT_DAMAGE;
           }
@@ -265,46 +373,89 @@ export function createWorld(seed = 1) {
         if (hz.z < -0.06) hz.hit = true;
       }
 
-      // Sea-skimming too low is a wave strike.
-      if (p.alt <= 400) {
-        this.damage(1, 'WAVE STRIKE! Pull up!');
+      // Sea-skimming: a warning first, then a wave strike only when truly
+      // on the water (below 200 ft). A strike costs a hull and bounces the
+      // plane back up — with 6 hull and 1.5 s of protection it stings,
+      // it no longer ends the run.
+      if (p.alt <= 450 && !this.lowWarned) {
+        this.lowWarned = true;
+        this.addMessage('PULL UP — WAVES!', '#ffb347');
+      }
+      if (p.alt > 700) this.lowWarned = false;
+      if (p.alt <= 200) {
+        if (this.invuln <= 0) {
+          this.damage(1, 'WAVE STRIKE! Pull up!');
+          this.invuln = 1.5;
+        }
         p.alt = 900;
         if (audio) audio.crash();
         events |= EVENT_DAMAGE;
         if (this.screen !== 'play') return events;
       }
 
-      // The island strip: land the cargo with a low pass.
+      // The island strip: land the cargo with a real touchdown, judged on
+      // speed, height, centreline and sink. Too high, too fast or off
+      // centre and the strip loops round for another attempt.
       if (this.strip && !this.strip.landed) {
         this.strip.z -= advance;
+        const allRingsHit = this.ringsHit === this.rings.length;
+        if (this.cargo && allRingsHit && this.strip.z < 1.2 && !this.approachWarned) {
+          this.approachWarned = true;
+          this.addMessage('FINAL APPROACH — slow down, line up with the strip', '#ffd23d');
+        }
         if (this.strip.z <= 0.02 && this.strip.z > -0.12) {
-          if (this.cargo && this.ringsHit === this.rings.length && p.alt < 1600 && Math.abs(p.x) < 0.3) {
+          if (this.cargo && allRingsHit && p.alt < 900 && p.speed < 170 && Math.abs(p.x) < 0.3) {
             this.strip.landed = true;
             this.deliveries += 1;
-            let pts = SCORES.delivery;
+            const sink = Math.max(0, -p.vs);
+            let lpts = 300;
+            lpts -= Math.max(0, p.speed - 140) * 2;
+            lpts -= Math.max(0, p.alt - 600) * 0.15;
+            lpts -= Math.abs(p.x) * 250;
+            lpts -= Math.max(0, sink - 300) * 0.1;
+            lpts = clamp(Math.round(lpts), 0, 300);
+            const grade = lpts >= 240 ? 'CLEAN' : lpts >= 140 ? 'FIRM' : 'HARD';
+            this.landing = { speed: Math.round(p.speed), alt: Math.round(p.alt), sink: Math.round(sink), grade, pts: lpts };
+            let pts = SCORES.delivery + lpts;
             if (this.ringsMissed === 0) { pts += SCORES.perfectRunBonus; this.perfectRuns += 1; this.addMessage(`PERFECT RUN +${SCORES.perfectRunBonus}`, '#ffd23d'); }
             this.score += pts;
-            this.addMessage(`DELIVERED TO ${this.mission().to.toUpperCase()} +${pts}`, '#7dff9a');
+            this.addMessage(`TOUCHDOWN ${grade} +${lpts} — DELIVERED TO ${this.mission().to.toUpperCase()} +${pts}`, '#7dff9a');
             this.burst(640, 420, '#7dff9a', 40);
             if (audio) audio.delivery();
+            // On the ground: fuel topped up, hull patched, plane sits on
+            // the water until the next takeoff.
+            this.fuel = 100;
+            this.hull = this.maxHull;
+            this.landed = true;
+            this.lift = 0;
+            p.alt = 380;
+            p.speed = 55;
+            p.throttle = 0.3;
             this.screen = 'delivered';
             events |= EVENT_DELIVERED;
           } else if (this.strip.z <= -0.1) {
             this.strip.z = 0.9; // loop the strip round for another attempt
             if (!this.cargo) this.addMessage('FLY THE RINGS FIRST — cargo is on the route', '#ffb347');
-            else this.addMessage('TOO HIGH / OFF CENTRE — circle back for the strip', '#ffb347');
+            else if (!allRingsHit) this.addMessage('RINGS REMAIN — finish the route first', '#ffb347');
+            else if (p.alt >= 900) this.addMessage('TOO HIGH — descend below 900 ft for the strip', '#ffb347');
+            else if (p.speed >= 170) this.addMessage('TOO FAST — slow below 170 kt to land', '#ffb347');
+            else this.addMessage('OFF CENTRE — line up with the strip', '#ffb347');
           }
         }
         if (this.strip.z < -0.12) this.strip.z = 0.95;
       }
 
-      // Messages and particles age out.
-      for (const m of this.messages) m.t += dt;
-      this.messages = this.messages.filter((m) => m.t < 2.6);
+      // One message at a time: only the head of the queue ages, the next
+      // shows when the current one expires.
+      if (this.messages.length > 0) {
+        this.messages[0].t += dt;
+        if (this.messages[0].t > 2.2) this.messages.shift();
+      }
       for (const pt of this.particles) { pt.t += dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 120 * dt; }
       this.particles = this.particles.filter((pt) => pt.t < pt.life);
       this.shake = Math.max(0, this.shake - dt * 1.4);
       this.flash = Math.max(0, this.flash - dt * 1.2);
+      this.invuln = Math.max(0, this.invuln - dt);
       this.speedLines = speed01;
       if (audio) audio.setThrottle(p.throttle, speed01);
       return events;
@@ -314,7 +465,7 @@ export function createWorld(seed = 1) {
       const next = this.missionIndex + 1;
       if (next >= MISSIONS.length) { this.screen = 'complete'; return; }
       this.reset(next, true);
-      this.screen = 'play';
+      this.startTakeoff();
     },
   };
   return world;
@@ -333,8 +484,10 @@ export function autopilotInput(world) {
     const da = ring.alt - p.alt;
     climb = da > 250 ? 1 : da < -250 ? -1 : 0;
   } else if (world.strip) {
+    // Final approach: line up on the centreline and settle at ~650 ft so
+    // the landing window (below 900 ft, below 170 kt) is met.
     steer = Math.max(-1, Math.min(1, (0 - p.x) * 2.2));
-    climb = p.alt > 1100 ? -1 : p.alt < 700 ? 1 : 0;
+    climb = p.alt > 750 ? -1 : p.alt < 550 ? 1 : 0;
   }
   return {
     steer: () => steer,

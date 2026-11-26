@@ -81,7 +81,10 @@ function groundY(z) { const d = depthOf(z); return HORIZON_Y + d * d * 428; }
 function airY(world, alt, z) {
   const d = depthOf(z);
   const rel = (alt - world.plane.alt) / 4200;
-  return HORIZON_Y - rel * (120 + d * 260) - d * 30;
+  // At the camera (d = 1) a ring at the plane's altitude sits exactly on the
+  // plane's screen height, so flying through the hole looks like flying
+  // through it; far away it still sits near the horizon, as it should.
+  return (HORIZON_Y + d * 184) - rel * (120 + d * 260);
 }
 function laneX(world, x, z) {
   const d = depthOf(z);
@@ -107,8 +110,9 @@ function drawSky(ctx, world) {
   g.addColorStop(1, PALETTE.horizonGlow);
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, VIEW.width, HORIZON_Y + 40);
-  // Low golden sun with halo.
-  const sunX = 930 - world.plane.x * 26;
+  // Low golden sun with halo — pinned to the sky, it never slides with
+  // steering (a distant sun does not move when the plane banks).
+  const sunX = 930;
   const sunY = 218;
   const halo = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 150);
   halo.addColorStop(0, 'rgba(255, 214, 120, 0.9)');
@@ -120,11 +124,12 @@ function drawSky(ctx, world) {
   ctx.beginPath();
   ctx.arc(sunX, sunY, 34, 0, Math.PI * 2);
   ctx.fill();
-  // Slow clouds, tinted by the sunset.
+  // Slow clouds, tinted by the sunset. They drift LEFT as the plane flies
+  // forward — the same direction as the world below them.
   ctx.fillStyle = 'rgba(255, 190, 150, 0.55)';
   const t = world.time * 6;
   for (let i = 0; i < 7; i += 1) {
-    const cx = ((i * 211 + t * (4 + i)) % 1450) - 80;
+    const cx = ((i * 211 - t * (4 + i)) % 1450 + 1450) % 1450 - 80;
     const cy = 52 + (i % 3) * 46;
     const cw = 120 + (i % 3) * 60;
     ctx.beginPath();
@@ -140,12 +145,12 @@ function drawSea(ctx, world) {
   g.addColorStop(1, PALETTE.seaDeep);
   ctx.fillStyle = g;
   ctx.fillRect(0, HORIZON_Y, VIEW.width, VIEW.height - HORIZON_Y);
-  // Sun glitter path on the water, kept tight under the sun.
+  // Sun glitter path on the water, kept tight under the pinned sun.
   ctx.fillStyle = 'rgba(255, 217, 138, 0.5)';
   for (let i = 0; i < 18; i += 1) {
     const y = HORIZON_Y + 12 + i * 20;
     const w = 18 + i * 5;
-    const x = 930 - world.plane.x * 20 + Math.sin(world.time * 2 + i * 1.7) * (6 + i * 0.5);
+    const x = 930 + Math.sin(world.time * 2 + i * 1.7) * (6 + i * 0.5);
     ctx.fillRect(x - w / 2, y, w, 3);
   }
   // Wave strokes.
@@ -267,8 +272,8 @@ function drawIsland(ctx, world, isl, onTitle) {
   ctx.restore();
 }
 
-function drawStrip(ctx, world, onTitle) {
-  const strip = world.strip;
+function drawStrip(ctx, world, onTitle, stripOverride, labelOverride) {
+  const strip = stripOverride || world.strip;
   if (!strip) return;
   const d = depthOf(strip.z);
   if (d <= 0.02) return;
@@ -308,16 +313,20 @@ function drawStrip(ctx, world, onTitle) {
   ctx.font = `bold ${Math.max(12, 18 * s)}px sans-serif`;
   ctx.textAlign = 'center';
   // On the title screen, never draw the runway label behind the menu panel.
-  if (d > 0.2 && !(onTitle && inTitlePanel(cx, y - 108 * s, 130))) ctx.fillText('▸ RUNWAY — ' + world.mission().to.toUpperCase(), cx, y - 108 * s);
+  const label = labelOverride || ('▸ RUNWAY — ' + world.mission().to.toUpperCase());
+  if (d > 0.2 && !(onTitle && inTitlePanel(cx, y - 108 * s, 130))) ctx.fillText(label, cx, y - 108 * s);
   ctx.restore();
 }
 
 function drawRing(ctx, world, ring, fuel, onTitle) {
   const d = depthOf(ring.z);
-  if (d <= 0.02 || ring.hit || ring.missed || ring.taken) return;
+  // A missed ring stays visible: it circles back around and can be hit.
+  if (d <= 0.02 || ring.hit || ring.taken) return;
   const x = laneX(world, ring.x, ring.z);
   const y = airY(world, ring.alt, ring.z);
-  const r = (26 + d * 108) * (fuel ? 0.8 : 1);
+  // Wide enough at the camera that the plane (296 px long) fits through
+  // the hole: a hit now looks like flying through the ring.
+  const r = (30 + d * 150) * (fuel ? 0.8 : 1);
   // On the title screen, rings behind the menu panel are hidden outright —
   // a glowing arc bleeding through the panel edge reads as a defect.
   if (onTitle && circleHitsTitlePanel(x, y, r)) return;
@@ -375,19 +384,26 @@ function drawHazard(ctx, world, hz, onTitle) {
 function drawPlane(ctx, world) {
   const p = world.plane;
   // On the title screen the plane sits right of the title panel, fully in
-  // frame; in flight it stays centred in the chase view.
+  // frame; in flight it stays centred in the chase view. On the water
+  // (takeoff roll, or sitting after a landing) it rides low in the frame
+  // and climbs to cruise height as it lifts off.
   const cx = VIEW.width / 2 + (world.screen === 'title' ? 180 : 0);
-  const cy = 452 + p.pitch * 26;
+  const onWater = world.screen === 'takeoff' || world.landed;
+  const cy = (onWater ? 545 - (world.lift || 0) * 93 : 452) + p.pitch * 26;
   const bank = p.bank;
   const propSpin = world.time * 42;
   ctx.save();
   ctx.translate(cx, cy);
   ctx.rotate(bank * 0.9);
-  // Soft shadow on the sea below.
-  ctx.fillStyle = 'rgba(6, 20, 40, 0.35)';
+  // Soft shadow on the sea below: close under the plane on the water,
+  // further below and smaller the higher the plane climbs.
+  const alt01 = clamp(p.alt / 9200, 0, 1);
+  ctx.fillStyle = `rgba(6, 20, 40, ${(0.35 * (1 - alt01 * 0.5)).toFixed(3)})`;
   ctx.beginPath();
-  ctx.ellipse(10, 128, 150, 14, 0, 0, Math.PI * 2);
+  ctx.ellipse(10, 60 + alt01 * 140, 150 * (1 - alt01 * 0.45), 14, 0, 0, Math.PI * 2);
   ctx.fill();
+  // Brief post-hit protection blinks the plane so the player can see it.
+  if (world.invuln > 0 && Math.floor(world.time * 12) % 2 === 0) ctx.globalAlpha = 0.45;
   // Pontoons.
   ctx.fillStyle = PALETTE.planeTeal;
   roundRect(ctx, -118, 58, 96, 16, 7); ctx.fill();
@@ -605,12 +621,13 @@ function drawHud(ctx, world, audio, input) {
   ctx.fillStyle = PALETTE.hudText;
   ctx.font = 'bold 13px sans-serif';
   ctx.fillText(Math.round(world.fuel) + '%', 1180, 36);
-  // Hull hearts.
+  // Hull hearts — one per hull point (six now, not three).
   ctx.font = '20px sans-serif';
   ctx.fillText('HULL', 1024, 84);
-  for (let i = 0; i < 3; i += 1) {
+  const maxHull = world.maxHull || 6;
+  for (let i = 0; i < maxHull; i += 1) {
     ctx.fillStyle = i < world.hull ? '#ff5a6e' : 'rgba(255,255,255,0.22)';
-    ctx.fillText('♥', 1080 + i * 26, 86);
+    ctx.fillText('♥', 1080 + i * 22, 86);
   }
   ctx.fillStyle = world.cargo ? PALETTE.ok : PALETTE.hudDim;
   ctx.font = 'bold 13px sans-serif';
@@ -658,12 +675,16 @@ function drawHud(ctx, world, audio, input) {
       : 'A/D steer · W/S throttle · ↑/↓ climb · P pause · M ' + (audio && audio.muted ? 'unmute' : 'mute'),
     1073, 683);
   ctx.restore();
-  // Floating messages, each on a dark pill so they read over bright rings.
+  // Floating message — one line at a time, on a dark pill so it reads over
+  // bright rings. The world queues messages; only the head is drawn, and
+  // only while flying: on the delivered / over / complete panels the message
+  // would sit half-hidden behind the panel (it freezes when play stops).
   ctx.save();
   ctx.textAlign = 'center';
-  world.messages.forEach((m, i) => {
-    const alpha = clamp(1 - m.t / 2.6, 0, 1);
-    const y = 190 + i * 32;
+  if ((world.screen === 'play' || world.screen === 'takeoff') && world.messages.length > 0) {
+    const m = world.messages[0];
+    const alpha = clamp(1 - m.t / 2.2, 0, 1);
+    const y = 190;
     ctx.globalAlpha = alpha * 0.78;
     ctx.font = 'bold 21px sans-serif';
     const w = ctx.measureText(m.text).width + 28;
@@ -673,7 +694,7 @@ function drawHud(ctx, world, audio, input) {
     ctx.globalAlpha = alpha;
     ctx.fillStyle = m.color;
     ctx.fillText(m.text, VIEW.width / 2, y);
-  });
+  }
   ctx.restore();
   // Damage flash.
   if (world.flash > 0) {
@@ -930,10 +951,15 @@ function drawDelivered(ctx, world, input) {
   ctx.fillStyle = PALETTE.hudText;
   ctx.font = 'bold 20px sans-serif';
   ctx.fillText(`${m.cargo} → ${m.to}`, 640, 292);
+  if (world.landing) {
+    ctx.font = 'bold 19px sans-serif';
+    ctx.fillStyle = world.landing.grade === 'CLEAN' ? PALETTE.ok : world.landing.grade === 'FIRM' ? PALETTE.ringGold : PALETTE.danger;
+    ctx.fillText(`Touchdown ${world.landing.speed} kt · ${world.landing.grade} · +${world.landing.pts}`, 640, 324);
+  }
   ctx.font = '17px sans-serif';
   ctx.fillStyle = PALETTE.hudDim;
-  ctx.fillText(`Rings ${world.ringsHit}/${world.rings.length}  ·  Best combo ×${world.bestCombo}`, 640, 326);
-  ctx.fillText(`Deliveries ${world.deliveries}/6  ·  Score ${world.score.toLocaleString()}`, 640, 354);
+  ctx.fillText(`Rings ${world.ringsHit}/${world.rings.length}  ·  Best combo ×${world.bestCombo}`, 640, 354);
+  ctx.fillText(`Deliveries ${world.deliveries}/6  ·  Score ${world.score.toLocaleString()}`, 640, 382);
   ctx.fillStyle = PALETTE.ringGold;
   ctx.font = 'bold 19px sans-serif';
   ctx.fillText(world.missionIndex + 1 >= MISSIONS.length ? `▶  ${cta(input)} — FINISH THE TOUR` : `▶  ${cta(input)} — NEXT DELIVERY`, 640, 412);
@@ -1007,6 +1033,11 @@ export function render(ctx, world, audio, input, ui) {
   const sorted = [...world.islands].sort((a, b) => b.z - a.z);
   for (const isl of sorted) drawIsland(ctx, world, isl, onTitle);
   drawStrip(ctx, world, onTitle);
+  // On takeoff the plane is still on the home runway: draw the departure
+  // strip under it (it scrolls past as the plane accelerates).
+  if (world.screen === 'takeoff' && world.homeStripZ != null && world.homeStripZ > 0.02) {
+    drawStrip(ctx, world, onTitle, { z: world.homeStripZ }, '▸ ' + world.mission().from.toUpperCase());
+  }
   for (const hz of world.hazards) drawHazard(ctx, world, hz, onTitle);
   for (const fr of world.fuelRings) drawRing(ctx, world, fr, true, onTitle);
   for (const ring of world.rings) drawRing(ctx, world, ring, false, onTitle);

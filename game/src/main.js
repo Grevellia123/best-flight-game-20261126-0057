@@ -3,7 +3,7 @@
 // while the screen is 'play'. ?shot=start|play|deliver|end stages a fixed
 // scene for screenshots and freezes it.
 
-import { VIEW } from './config.js';
+import { VIEW, PALETTE } from './config.js';
 import { createWorld } from './world.js';
 import { render, titleHit } from './render.js';
 import { createInput } from './input.js';
@@ -16,6 +16,10 @@ const ctx = canvas.getContext('2d');
 const audio = createAudio();
 const input = createInput(canvas);
 const world = createWorld(20261126);
+// Debug / verification handle (same pattern as v4): lets a test drive the
+// real game and read its state without touching the DOM.
+window.__vsc1World = world;
+window.__vsc1Input = input;
 
 // On-screen touch buttons (also clickable with a mouse): hold buttons for
 // throttle and climb, tap buttons for pause and mute.
@@ -88,9 +92,12 @@ function resize() {
   const ox = (canvas.width - VIEW.width * scale) / 2;
   const oy = (canvas.height - VIEW.height * scale) / 2;
   ctx.setTransform(scale, 0, 0, scale, ox, oy);
-  // Letterbox bars.
-  ctx.fillStyle = '#0a0e1e';
+  // Letterbox bars continue the scene instead of black: the sky gradient's
+  // top colour above the frame, the sea's deep colour below it — so on a
+  // portrait phone the whole screen reads as sky and sea, not black bars.
+  ctx.fillStyle = PALETTE.skyTop;
   ctx.fillRect(-ox / scale - 2, -oy / scale - 2, VIEW.width + ox / scale * 2 + 4, oy / scale + 2);
+  ctx.fillStyle = PALETTE.seaDeep;
   ctx.fillRect(-ox / scale - 2, VIEW.height, VIEW.width + ox / scale * 2 + 4, oy / scale + 4);
 }
 window.addEventListener('resize', resize);
@@ -119,24 +126,30 @@ function startRun() {
   audio.resume();
   audio.click();
   world.reset(0, false);
-  world.screen = 'play';
+  world.startTakeoff();
   audio.startEngine();
-  announce('Flying! Fly through the golden rings, pick up cargo, land on the island strip.');
+  announce('Takeoff roll! Lift off at 95 knots, fly the golden rings, pick up cargo, land on the island strip.');
 }
 
 function nextStep() {
   audio.click();
   if (world.screen === 'delivered') {
     world.nextMission();
-    if (world.screen === 'play') audio.startEngine();
+    if (world.screen === 'takeoff') audio.startEngine();
   } else if (world.screen === 'over' || world.screen === 'complete') {
     startRun();
   }
 }
 
 function togglePause() {
-  if (world.screen === 'play') { world.screen = 'paused'; audio.setThrottle(0, 0); }
-  else if (world.screen === 'paused') { world.screen = 'play'; }
+  if (world.screen === 'play' || world.screen === 'takeoff') {
+    world.pausedFrom = world.screen;
+    world.screen = 'paused';
+    audio.setThrottle(0, 0);
+  } else if (world.screen === 'paused') {
+    world.screen = world.pausedFrom || 'play';
+    world.pausedFrom = null;
+  }
 }
 
 input.onKey = (code) => {
@@ -155,7 +168,7 @@ input.onKey = (code) => {
     audio.setMuted(!audio.muted);
     updateMuteBtn();
   } else if (code === 'KeyR') {
-    if (world.screen === 'play' || world.screen === 'paused' || world.screen === 'over') startRun();
+    if (world.screen === 'play' || world.screen === 'takeoff' || world.screen === 'paused' || world.screen === 'over') startRun();
   }
 };
 
@@ -189,7 +202,10 @@ input.onClick = (clientX, clientY) => {
 };
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && world.screen === 'play' && !shotMode) world.screen = 'paused';
+  if (document.hidden && (world.screen === 'play' || world.screen === 'takeoff') && !shotMode) {
+    world.pausedFrom = world.screen;
+    world.screen = 'paused';
+  }
 });
 
 // Screenshot mode: stage one fixed scene and hold it still.
@@ -235,7 +251,7 @@ function frame(now) {
   lastTime = now;
   if (dt > 0.05) dt = 0.05; // clamp: tab switches never fast-forward the flight
   if (dt < 0) dt = 0;
-  if (world.screen === 'play') {
+  if (world.screen === 'play' || world.screen === 'takeoff') {
     world.step(dt, input, audio);
     if (world.screen === 'over') audio.stopEngine();
     if (world.screen === 'delivered') audio.stopEngine();
@@ -258,9 +274,11 @@ function frame(now) {
     if (pauseBtn.textContent !== label) pauseBtn.textContent = label;
   }
   render(ctx, world, audio, input, { settings, settingsOpen });
-  if (world.screen === 'play') {
+  if (world.screen === 'play' || world.screen === 'takeoff') {
     const m = world.mission();
-    announce(`Day ${m.day}, delivery ${m.id} of 6 to ${m.to}. Score ${world.score}. Fuel ${Math.round(world.fuel)} percent.`);
+    announce(world.screen === 'takeoff'
+      ? `Takeoff roll from ${m.from}. Lift off at 95 knots.`
+      : `Day ${m.day}, delivery ${m.id} of 6 to ${m.to}. Score ${world.score}. Fuel ${Math.round(world.fuel)} percent.`);
   }
 }
 requestAnimationFrame(frame);

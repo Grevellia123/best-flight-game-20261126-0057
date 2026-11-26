@@ -1,7 +1,7 @@
 // Keyboard, mouse and touch input for Volcano Sky Courier.
 // Steer with A/D or arrow keys, throttle with W/S, climb with Up/Down.
-// The mouse steers too: hold and drag sideways, or just move it — the plane
-// banks toward the pointer. Touch drag steers the same way, and a short tap
+// The mouse steers too, but only while its button is held down — a resting
+// mouse never banks the plane. Touch drag steers the same way, and a short tap
 // anywhere starts / continues the game. On-screen buttons (wired with
 // bindHold) give touch players throttle, climb, pause and mute — each button
 // tracks its own pointer, so one finger can steer while another holds a
@@ -27,10 +27,14 @@ export function createInput(canvas) {
     onKey: null, // (code) => void, set by main.js for pause/mute/start
     onClick: null, // (x, y) => void, set by main.js for buttons
 
+    // Steering: keys win outright; the mouse steers ONLY while its button
+    // is held down, so a resting mouse (or a lifted touch finger) can never
+    // bank the plane on its own. Touch drag steers the same way.
     steer() {
       let s = 0;
       if (this.left) s -= 1;
       if (this.right) s += 1;
+      if (this.left || this.right) return Math.max(-1, Math.min(1, s));
       if (this.mouseActive) {
         const target = (this.mouseX - 0.5) * 2;
         s += Math.max(-1, Math.min(1, target * 1.4));
@@ -137,9 +141,9 @@ export function createInput(canvas) {
   canvas.addEventListener('pointermove', (e) => {
     const x = canvasX(e);
     if (x === null) return;
+    // Mouse move alone never steers: only a held mouse button does.
     if (e.pointerType === 'mouse') {
-      input.mouseX = x;
-      input.mouseActive = true;
+      if (input.mouseDown) input.mouseX = x;
     } else if (e.pointerId === steerPointer) {
       input.mouseX = x;
     }
@@ -154,14 +158,26 @@ export function createInput(canvas) {
       if (held < 500 && moved < 16 && input.onClick) input.onClick(e.clientX, e.clientY);
       tap = null;
     }
-    if (e.pointerId === steerPointer) steerPointer = null;
-    if (e.pointerType === 'mouse') input.mouseDown = false;
+    if (e.pointerId === steerPointer) {
+      steerPointer = null;
+      input.mouseActive = false; // lifted finger stops steering
+    }
+    if (e.pointerType === 'mouse') {
+      input.mouseDown = false;
+      input.mouseActive = false; // released button stops steering
+    }
   }
   canvas.addEventListener('pointerup', pointerEnd);
   canvas.addEventListener('pointercancel', (e) => {
     tap = null;
-    if (e.pointerId === steerPointer) steerPointer = null;
-    if (e.pointerType === 'mouse') input.mouseDown = false;
+    if (e.pointerId === steerPointer) {
+      steerPointer = null;
+      input.mouseActive = false;
+    }
+    if (e.pointerType === 'mouse') {
+      input.mouseDown = false;
+      input.mouseActive = false;
+    }
   });
   // Long-press context menus must never pop up over the game.
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());

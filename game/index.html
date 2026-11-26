@@ -34,17 +34,11 @@
     .ctl { min-width: 48px; min-height: 48px; font-size: 13px; padding: 0 8px; }
     .ctl.round { min-width: 48px; width: 48px; font-size: 20px; }
   }
-  /* Landscape-first game: in portrait on a touch phone, ask to rotate. */
-  #rotate-hint {
-    position: fixed; left: 50%; top: max(14px, env(safe-area-inset-top));
-    transform: translateX(-50%); z-index: 6; display: none;
-    background: rgba(12, 18, 38, 0.88); border: 1px solid rgba(255, 210, 61, 0.85);
-    color: #fff6dd; font: bold 14px sans-serif; padding: 10px 16px; border-radius: 10px;
-    text-align: center; pointer-events: none; white-space: nowrap;
-  }
-  @media (orientation: portrait) and (pointer: coarse) { #rotate-hint { display: block; } }
+  /* Portrait phones play the same landscape game, scaled to fit the
+     width, with the sky and sea continuing into the bars above and below
+     it (see resize() in main.js) — no black bars, no rotate banner. */
   /* Screenshot scenes render the bare game: hide the DOM controls there. */
-  body.shot-mode #touch-ui, body.shot-mode #rotate-hint { display: none; }
+  body.shot-mode #touch-ui { display: none; }
   /* On the title screen the flight buttons do nothing (tap anywhere to fly)
      and would sit over the title panel on landscape phones, so hide them
      there; pause and mute stay available. */
@@ -66,7 +60,6 @@
     <button type="button" class="ctl round" id="btn-mute" aria-label="Mute sound">🔊</button>
   </div>
 </div>
-<div id="rotate-hint">🔄 Rotate your phone — this flight is best in landscape</div>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

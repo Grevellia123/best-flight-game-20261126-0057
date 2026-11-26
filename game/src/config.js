@@ -50,7 +50,8 @@ export const FLIGHT = {
   fuelBurnBoost: 1.15, // % per second at full throttle
   ringFuelBonus: 6,
   startFuel: 100,
-  startHull: 3,
+  startHull: 6, // six hull: a wave or an ash cloud stings, it no longer ends the run
+  maxHull: 6,
 };
 
 // Six courier runs, two per day across three golden-hour days. Each run is a
@@ -85,4 +86,4 @@ export const SCORES = {
   ringFuelBonus: 6,
 };
 
-export const CONTROLS_TEXT = 'A/D or ←/→ steer · W/S throttle · ↑/↓ climb & descend · mouse steers too · P pause · M mute';
+export const CONTROLS_TEXT = 'A/D or ←/→ steer · W/S throttle · ↑/↓ climb & descend · hold mouse to steer · P pause · M mute';
