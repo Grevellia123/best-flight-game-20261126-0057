@@ -1,7 +1,11 @@
 // Keyboard, mouse and touch input for Volcano Sky Courier.
 // Steer with A/D or arrow keys, throttle with W/S, climb with Up/Down.
 // The mouse steers too: hold and drag sideways, or just move it — the plane
-// banks toward the pointer. Touch drag steers the same way.
+// banks toward the pointer. Touch drag steers the same way, and a short tap
+// anywhere starts / continues the game. On-screen buttons (wired with
+// bindHold) give touch players throttle, climb, pause and mute — each button
+// tracks its own pointer, so one finger can steer while another holds a
+// button. All input runs through Pointer Events, one path for mouse + touch.
 
 export function createInput(canvas) {
   const input = {
@@ -14,6 +18,7 @@ export function createInput(canvas) {
     mouseX: 0.5, // 0..1 across the canvas
     mouseActive: false,
     mouseDown: false,
+    isTouch: false, // set on the first touch; render switches hints to touch
     pressedKeys: new Set(),
     onKey: null, // (code) => void, set by main.js for pause/mute/start
     onClick: null, // (x, y) => void, set by main.js for buttons
@@ -39,6 +44,29 @@ export function createInput(canvas) {
       if (this.throttleUp) d += 1;
       if (this.throttleDown) d -= 1;
       return d;
+    },
+
+    // Wire an on-screen hold button: while it is held (pointer down) the
+    // named flag stays true. Each button tracks its own pointer, so several
+    // fingers can hold different buttons at once, and a held button never
+    // steals the steering finger (buttons are DOM elements above the canvas).
+    bindHold(el, prop) {
+      if (!el) return;
+      el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        if (e.pointerType === 'touch') input.isTouch = true;
+        input[prop] = true;
+        el.classList.add('pressed');
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* no capture */ }
+      });
+      const release = () => {
+        input[prop] = false;
+        el.classList.remove('pressed');
+      };
+      el.addEventListener('pointerup', release);
+      el.addEventListener('pointercancel', release);
+      el.addEventListener('lostpointercapture', release);
+      el.addEventListener('contextmenu', (e) => e.preventDefault());
     },
   };
 
@@ -70,31 +98,69 @@ export function createInput(canvas) {
     input.throttleUp = input.throttleDown = false;
     input.pressedKeys.clear();
     input.mouseActive = false;
+    steerPointer = null;
+    tap = null;
   });
 
-  function pointerMove(e) {
+  // --- Pointer input on the canvas (mouse + touch, one path) ---
+  let steerPointer = null; // pointerId currently steering by touch
+  let tap = null; // { id, x, y, t } — a short, still press counts as a tap
+
+  function canvasX(e) {
     const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0) return;
-    input.mouseX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    input.mouseActive = true;
+    if (rect.width === 0) return null;
+    return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
   }
-  canvas.addEventListener('mousemove', pointerMove);
-  canvas.addEventListener('mousedown', (e) => {
-    input.mouseDown = true;
-    pointerMove(e);
-    if (input.onClick) input.onClick(e.clientX, e.clientY);
+
+  canvas.addEventListener('pointerdown', (e) => {
+    // Never let the browser take the touch for scroll / zoom / menus:
+    // the canvas owns every pointer that lands on it.
+    e.preventDefault();
+    if (e.pointerType === 'touch') input.isTouch = true;
+    const x = canvasX(e);
+    if (x === null) return;
+    if (e.pointerType === 'mouse') {
+      input.mouseDown = true;
+      input.mouseX = x;
+      input.mouseActive = true;
+    } else if (steerPointer === null) {
+      steerPointer = e.pointerId;
+      input.mouseX = x;
+      input.mouseActive = true;
+    }
+    tap = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
   });
-  window.addEventListener('mouseup', () => { input.mouseDown = false; });
-  canvas.addEventListener('touchstart', (e) => {
-    const t = e.touches[0];
-    if (t) { input.mouseX = t.clientX / window.innerWidth; input.mouseActive = true; }
-    e.preventDefault();
-  }, { passive: false });
-  canvas.addEventListener('touchmove', (e) => {
-    const t = e.touches[0];
-    if (t) input.mouseX = t.clientX / window.innerWidth;
-    e.preventDefault();
-  }, { passive: false });
+  canvas.addEventListener('pointermove', (e) => {
+    const x = canvasX(e);
+    if (x === null) return;
+    if (e.pointerType === 'mouse') {
+      input.mouseX = x;
+      input.mouseActive = true;
+    } else if (e.pointerId === steerPointer) {
+      input.mouseX = x;
+    }
+  });
+  function pointerEnd(e) {
+    if (tap && tap.id === e.pointerId) {
+      const held = performance.now() - tap.t;
+      const moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
+      // A short, nearly still press is a tap: start / continue / resume.
+      // A drag is steering, never a tap — so dragging never starts the game
+      // by accident and never skips a panel.
+      if (held < 500 && moved < 16 && input.onClick) input.onClick(e.clientX, e.clientY);
+      tap = null;
+    }
+    if (e.pointerId === steerPointer) steerPointer = null;
+    if (e.pointerType === 'mouse') input.mouseDown = false;
+  }
+  canvas.addEventListener('pointerup', pointerEnd);
+  canvas.addEventListener('pointercancel', (e) => {
+    tap = null;
+    if (e.pointerId === steerPointer) steerPointer = null;
+    if (e.pointerType === 'mouse') input.mouseDown = false;
+  });
+  // Long-press context menus must never pop up over the game.
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   return input;
 }

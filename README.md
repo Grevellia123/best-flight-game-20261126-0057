@@ -10,19 +10,35 @@ wave strikes turning each sortie into decisions.
 
 ## Play
 
-Serve `game/` locally and open it in a desktop browser:
+Serve `game/` locally and open it in a browser — desktop, Android or iOS,
+same game:
 
 ```sh
 node serve.ts
 # open http://localhost:8080
 ```
 
+Best in landscape on a phone; in portrait the game asks you to rotate.
+
 ## Controls
 
-- **A/D** or **←/→** — steer (mouse steers too)
+- **A/D** or **←/→** — steer (mouse steers too; touch drag steers on phones)
 - **W/S** — throttle up / down
 - **↑/↓** — climb / descend
 - **P** — pause, **M** — mute, **R** — restart run, **Enter** — start / continue
+- **On-screen buttons** — tap THR ▲/▼ for throttle, ▲ CLIMB / ▼ DIVE for
+  altitude, ⏸ to pause, 🔊 to mute. They work by touch and by mouse click,
+  and several fingers can hold different buttons at once. Tap anywhere to
+  start, continue, or resume.
+
+## Music
+
+An original golden-hour flight theme, synthesised live with Web Audio — no
+audio files. Airy and flowing while you fly, calm on the title screen,
+tenser and faster when fuel runs low or the hull is nearly gone, shimmering
+on the final approach, with a celebratory phrase on delivery and a somber
+one when a sortie is lost. It starts on your first tap, click or key press,
+and the 🔊 button (or M) mutes everything.
 
 ## Screenshots
 

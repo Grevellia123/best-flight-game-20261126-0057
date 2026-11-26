@@ -17,6 +17,35 @@ const audio = createAudio();
 const input = createInput(canvas);
 const world = createWorld(20261126);
 
+// On-screen touch buttons (also clickable with a mouse): hold buttons for
+// throttle and climb, tap buttons for pause and mute.
+document.querySelectorAll('#touch-ui [data-hold]').forEach((el) => {
+  input.bindHold(el, el.dataset.hold);
+});
+const pauseBtn = document.getElementById('btn-pause');
+const muteBtn = document.getElementById('btn-mute');
+function updateMuteBtn() {
+  if (!muteBtn) return;
+  muteBtn.textContent = audio.muted ? '🔇' : '🔊';
+  muteBtn.setAttribute('aria-label', audio.muted ? 'Unmute sound' : 'Mute sound');
+}
+if (pauseBtn) {
+  pauseBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    if (shotMode) return;
+    audio.resume();
+    togglePause();
+  });
+}
+if (muteBtn) {
+  muteBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    audio.resume();
+    audio.setMuted(!audio.muted);
+    updateMuteBtn();
+  });
+}
+
 let lastTime = 0;
 let shotMode = null;
 let announced = '';
@@ -80,6 +109,7 @@ input.onKey = (code) => {
     togglePause();
   } else if (code === 'KeyM') {
     audio.setMuted(!audio.muted);
+    updateMuteBtn();
   } else if (code === 'KeyR') {
     if (world.screen === 'play' || world.screen === 'paused' || world.screen === 'over') startRun();
   }
@@ -102,17 +132,39 @@ const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
 if (shot) {
   shotMode = shot;
+  // Screenshots render the bare game: hide the DOM touch controls.
+  document.body.classList.add('shot-mode');
   const screen = stageShot(shot, world, null);
   world.screen = screen === 'title' ? 'title' : screen;
-  render(ctx, world, audio);
+  render(ctx, world, audio, input);
   announce('Screenshot scene: ' + shot);
 } else {
   world.screen = 'title';
 }
 
+// Background music follows the game: calm on the title, the main loop in
+// flight, tenser when fuel is low or the hull is nearly gone, shimmering on
+// the final approach, quiet while paused.
+function moodFor() {
+  switch (world.screen) {
+    case 'title': return 'title';
+    case 'delivered':
+    case 'complete': return 'win';
+    case 'over': return 'over';
+    case 'paused': return 'paused';
+    default: {
+      if (world.fuel < 25 || world.hull <= 1) return 'danger';
+      if (world.cargo && world.strip && world.strip.z < 0.55) return 'approach';
+      return 'play';
+    }
+  }
+}
+
+let prevScreen = world.screen;
+
 function frame(now) {
   requestAnimationFrame(frame);
-  if (shotMode) { render(ctx, world, audio); return; }
+  if (shotMode) { render(ctx, world, audio, input); return; }
   if (!lastTime) lastTime = now;
   let dt = (now - lastTime) / 1000;
   lastTime = now;
@@ -125,7 +177,20 @@ function frame(now) {
   } else if (world.screen === 'title') {
     world.time += dt; // let the lagoon shimmer behind the title
   }
-  render(ctx, world, audio);
+  // Screen changes get their own musical phrase, once.
+  if (world.screen !== prevScreen) {
+    if (world.screen === 'delivered' || world.screen === 'complete') audio.winPhrase();
+    else if (world.screen === 'over') audio.somberPhrase();
+    prevScreen = world.screen;
+  }
+  audio.setMood(moodFor());
+  audio.update();
+  // The pause button shows ▶ while paused, ⏸ while flying.
+  if (pauseBtn) {
+    const label = world.screen === 'paused' ? '▶' : '⏸';
+    if (pauseBtn.textContent !== label) pauseBtn.textContent = label;
+  }
+  render(ctx, world, audio, input);
   if (world.screen === 'play') {
     const m = world.mission();
     announce(`Day ${m.day}, delivery ${m.id} of 6 to ${m.to}. Score ${world.score}. Fuel ${Math.round(world.fuel)} percent.`);

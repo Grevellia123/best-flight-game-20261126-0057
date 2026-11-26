@@ -477,7 +477,11 @@ function compassStrip(ctx, world) {
   ctx.restore();
 }
 
-function drawHud(ctx, world, audio) {
+// Call-to-action verb for a panel: touch players tap, desktop players press
+// Enter. Screenshots (desktop) always show the Enter wording.
+function cta(input) { return input && input.isTouch ? 'TAP' : 'PRESS ENTER'; }
+
+function drawHud(ctx, world, audio, input) {
   const p = world.plane;
   // Compass.
   compassStrip(ctx, world);
@@ -567,14 +571,19 @@ function drawHud(ctx, world, audio) {
   ctx.fillStyle = '#7dd8ff';
   roundRect(ctx, 28, 670, 212 * p.throttle, 12, 6); ctx.fill();
   ctx.restore();
-  // Controls hint, bottom right.
+  // Controls hint, bottom right: touch hints on touch devices, never
+  // keyboard-only instructions on a phone.
   ctx.save();
   ctx.fillStyle = 'rgba(12, 18, 38, 0.55)';
   roundRect(ctx, 880, 668, 386, 30, 8); ctx.fill();
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('A/D steer · W/S throttle · ↑/↓ climb · P pause · M ' + (audio && audio.muted ? 'unmute' : 'mute'), 1073, 687);
+  ctx.fillText(
+    input && input.isTouch
+      ? 'Drag to steer · hold THR / CLIMB buttons · ⏸ pause · 🔊 mute'
+      : 'A/D steer · W/S throttle · ↑/↓ climb · P pause · M ' + (audio && audio.muted ? 'unmute' : 'mute'),
+    1073, 687);
   ctx.restore();
   // Floating messages, each on a dark pill so they read over bright rings.
   ctx.save();
@@ -608,7 +617,7 @@ function panel(ctx, x, y, w, h) {
   roundRect(ctx, x, y, w, h, 16); ctx.stroke();
 }
 
-function drawTitle(ctx, world) {
+function drawTitle(ctx, world, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.35)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
   panel(ctx, 56, 120, 560, 470);
@@ -632,18 +641,26 @@ function drawTitle(ctx, world) {
   ctx.fillText('▸ Mind fuel, ash clouds and the waves', 84, 422);
   ctx.fillStyle = PALETTE.ringGold;
   ctx.font = 'bold 19px sans-serif';
-  ctx.fillText('▶  PRESS ENTER OR CLICK TO FLY', 84, 474);
+  ctx.fillText(input && input.isTouch ? '▶  TAP TO FLY' : '▶  PRESS ENTER OR CLICK TO FLY', 84, 474);
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '13px sans-serif';
-  ctx.fillText('A/D or ←/→ steer · W/S throttle · ↑/↓ climb & descend', 84, 506);
-  ctx.fillText('Mouse steers too · P pause · M mute', 84, 528);
+  ctx.fillText(
+    input && input.isTouch
+      ? 'Drag to steer · THR & CLIMB buttons on screen'
+      : 'A/D or ←/→ steer · W/S throttle · ↑/↓ climb & descend',
+    84, 506);
+  ctx.fillText(
+    input && input.isTouch
+      ? 'Tap ⏸ to pause · 🔊 to mute · best in landscape'
+      : 'Mouse steers too · P pause · M mute',
+    84, 528);
   ctx.fillStyle = PALETTE.hudText;
   ctx.font = 'bold 15px sans-serif';
   ctx.fillText('6 DELIVERIES  ·  3 DAYS  ·  $500 PRIZE POOL', 84, 564);
   ctx.restore();
 }
 
-function drawPaused(ctx) {
+function drawPaused(ctx, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.6)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
   panel(ctx, 440, 250, 400, 200);
@@ -654,12 +671,12 @@ function drawPaused(ctx) {
   ctx.fillText('PAUSED', 640, 322);
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '16px sans-serif';
-  ctx.fillText('Press P or click to keep flying', 640, 360);
+  ctx.fillText(input && input.isTouch ? 'Tap ▶ or tap anywhere to keep flying' : 'Press P or click to keep flying', 640, 360);
   ctx.fillText('M mute  ·  R restart run', 640, 390);
   ctx.restore();
 }
 
-function drawDelivered(ctx, world) {
+function drawDelivered(ctx, world, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.45)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
   panel(ctx, 360, 190, 560, 330);
@@ -678,14 +695,14 @@ function drawDelivered(ctx, world) {
   ctx.fillText(`Deliveries ${world.deliveries}/6  ·  Score ${world.score.toLocaleString()}`, 640, 354);
   ctx.fillStyle = PALETTE.ringGold;
   ctx.font = 'bold 19px sans-serif';
-  ctx.fillText(world.missionIndex + 1 >= MISSIONS.length ? '▶  PRESS ENTER — FINISH THE TOUR' : '▶  PRESS ENTER — NEXT DELIVERY', 640, 412);
+  ctx.fillText(world.missionIndex + 1 >= MISSIONS.length ? `▶  ${cta(input)} — FINISH THE TOUR` : `▶  ${cta(input)} — NEXT DELIVERY`, 640, 412);
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '14px sans-serif';
   ctx.fillText('Fuel topped up · hull patched · the next island is waiting', 640, 448);
   ctx.restore();
 }
 
-function drawOver(ctx, world) {
+function drawOver(ctx, world, input) {
   ctx.fillStyle = 'rgba(30, 8, 10, 0.55)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
   panel(ctx, 360, 200, 560, 320);
@@ -702,14 +719,14 @@ function drawOver(ctx, world) {
   ctx.fillText(`Score ${world.score.toLocaleString()}  ·  Deliveries ${world.deliveries}/6  ·  Rings ${world.ringsHit}`, 640, 342);
   ctx.fillStyle = PALETTE.ringGold;
   ctx.font = 'bold 19px sans-serif';
-  ctx.fillText('▶  PRESS ENTER — FLY AGAIN', 640, 404);
+  ctx.fillText(`▶  ${cta(input)} — FLY AGAIN`, 640, 404);
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '14px sans-serif';
   ctx.fillText('Tip: green rings are fuel. Ash clouds cost a hull.', 640, 440);
   ctx.restore();
 }
 
-function drawComplete(ctx, world) {
+function drawComplete(ctx, world, input) {
   ctx.fillStyle = 'rgba(10, 14, 30, 0.5)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
   panel(ctx, 330, 170, 620, 360);
@@ -727,14 +744,14 @@ function drawComplete(ctx, world) {
   ctx.fillText('FINAL SCORE  ' + world.score.toLocaleString(), 640, 368);
   ctx.fillStyle = PALETTE.hudText;
   ctx.font = 'bold 19px sans-serif';
-  ctx.fillText('▶  PRESS ENTER — FLY THE TOUR AGAIN', 640, 428);
+  ctx.fillText(`▶  ${cta(input)} — FLY THE TOUR AGAIN`, 640, 428);
   ctx.fillStyle = PALETTE.hudDim;
   ctx.font = '14px sans-serif';
   ctx.fillText('Volcano Sky Courier — thank you for flying with us.', 640, 464);
   ctx.restore();
 }
 
-export function render(ctx, world, audio) {
+export function render(ctx, world, audio, input) {
   ctx.save();
   if (world.shake > 0) {
     ctx.translate((Math.random() - 0.5) * world.shake * 14, (Math.random() - 0.5) * world.shake * 14);
@@ -758,11 +775,11 @@ export function render(ctx, world, audio) {
   }
   ctx.globalAlpha = 1;
   drawPlane(ctx, world);
-  drawHud(ctx, world, audio);
-  if (world.screen === 'title') drawTitle(ctx, world);
-  else if (world.screen === 'paused') drawPaused(ctx);
-  else if (world.screen === 'delivered') drawDelivered(ctx, world);
-  else if (world.screen === 'over') drawOver(ctx, world);
-  else if (world.screen === 'complete') drawComplete(ctx, world);
+  drawHud(ctx, world, audio, input);
+  if (world.screen === 'title') drawTitle(ctx, world, input);
+  else if (world.screen === 'paused') drawPaused(ctx, input);
+  else if (world.screen === 'delivered') drawDelivered(ctx, world, input);
+  else if (world.screen === 'over') drawOver(ctx, world, input);
+  else if (world.screen === 'complete') drawComplete(ctx, world, input);
   ctx.restore();
 }
