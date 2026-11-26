@@ -5,7 +5,7 @@
 
 import { VIEW } from './config.js';
 import { createWorld } from './world.js';
-import { render } from './render.js';
+import { render, titleHit } from './render.js';
 import { createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { stageShot } from './shots.js';
@@ -46,12 +46,40 @@ if (muteBtn) {
   });
 }
 
+// --- Settings (gear on the title card) ---
+// Music on/off, Sound FX on/off, Quality Low/High. Persisted in safe
+// localStorage (try/catch, in-memory values if storage is unavailable).
+const SETTINGS_KEY = 'vsc-settings-v1';
+const settings = { music: true, sfx: true, quality: 'high' };
+let settingsOpen = false;
+function loadSettings() {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (typeof s.music === 'boolean') settings.music = s.music;
+    if (typeof s.sfx === 'boolean') settings.sfx = s.sfx;
+    if (s.quality === 'low' || s.quality === 'high') settings.quality = s.quality;
+  } catch (e) { /* storage unavailable: keep defaults */ }
+}
+function saveSettings() {
+  try { window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+}
+function applySettings() {
+  audio.musicEnabled = settings.music;
+  audio.sfxEnabled = settings.sfx;
+  resize(); // Low quality also lowers the canvas resolution scale
+}
+
 let lastTime = 0;
 let shotMode = null;
 let announced = '';
 
 function resize() {
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  // Low quality renders at 0.75x resolution (visible softening, faster on
+  // low-end phones); High uses the native DPR, capped at 2.
+  const baseDpr = Math.min(2, window.devicePixelRatio || 1);
+  const dpr = settings.quality === 'low' ? baseDpr * 0.75 : baseDpr;
   canvas.width = Math.floor(window.innerWidth * dpr);
   canvas.height = Math.floor(window.innerHeight * dpr);
   canvas.style.width = window.innerWidth + 'px';
@@ -67,6 +95,18 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+loadSettings();
+applySettings();
+
+// CSS pixels -> 1280x720 VIEW coords (the canvas is letterboxed inside the
+// window, so the offset/scale must be undone for title-screen hit tests).
+function toView(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scale = Math.min(rect.width / VIEW.width, rect.height / VIEW.height);
+  const ox = (rect.width - VIEW.width * scale) / 2;
+  const oy = (rect.height - VIEW.height * scale) / 2;
+  return { x: (clientX - rect.left - ox) / scale, y: (clientY - rect.top - oy) / scale };
+}
 
 function announce(text) {
   if (text === announced) return;
@@ -75,6 +115,7 @@ function announce(text) {
 }
 
 function startRun() {
+  settingsOpen = false;
   audio.resume();
   audio.click();
   world.reset(0, false);
@@ -102,10 +143,13 @@ input.onKey = (code) => {
   if (shotMode) return;
   audio.resume();
   if (code === 'Enter' || code === 'Space') {
-    if (world.screen === 'title') startRun();
+    if (world.screen === 'title') { settingsOpen = false; startRun(); }
     else if (world.screen === 'delivered' || world.screen === 'over' || world.screen === 'complete') nextStep();
     else if (world.screen === 'paused') togglePause();
-  } else if (code === 'KeyP' || code === 'Escape') {
+  } else if (code === 'Escape') {
+    if (settingsOpen) { settingsOpen = false; return; }
+    togglePause();
+  } else if (code === 'KeyP') {
     togglePause();
   } else if (code === 'KeyM') {
     audio.setMuted(!audio.muted);
@@ -115,11 +159,32 @@ input.onKey = (code) => {
   }
 };
 
-input.onClick = () => {
+input.onClick = (clientX, clientY) => {
   if (shotMode) return;
   audio.resume();
-  if (world.screen === 'title') startRun();
-  else if (world.screen === 'delivered' || world.screen === 'over' || world.screen === 'complete') nextStep();
+  if (world.screen === 'title') {
+    // Title-screen taps first hit the card UI: gear, settings rows, or the
+    // fly pill. A tap anywhere else while settings are open just closes
+    // them — it never starts the game by accident.
+    const v = toView(clientX, clientY);
+    const hit = titleHit(v.x, v.y, settingsOpen);
+    if (hit === 'gear') { settingsOpen = !settingsOpen; audio.click(); return; }
+    if (settingsOpen) {
+      if (hit === 'settings-close') { settingsOpen = false; audio.click(); return; }
+      if (hit === 'music') { settings.music = !settings.music; applySettings(); saveSettings(); audio.click(); return; }
+      if (hit === 'sfx') { settings.sfx = !settings.sfx; applySettings(); saveSettings(); audio.click(); return; }
+      if (hit === 'quality-low' || hit === 'quality-high') {
+        settings.quality = hit === 'quality-low' ? 'low' : 'high';
+        applySettings(); saveSettings(); audio.click(); return;
+      }
+      if (hit === 'cta') { settingsOpen = false; startRun(); return; }
+      settingsOpen = false;
+      return;
+    }
+    startRun();
+    return;
+  }
+  if (world.screen === 'delivered' || world.screen === 'over' || world.screen === 'complete') nextStep();
   else if (world.screen === 'paused') togglePause();
 };
 
@@ -136,7 +201,7 @@ if (shot) {
   document.body.classList.add('shot-mode');
   const screen = stageShot(shot, world, null);
   world.screen = screen === 'title' ? 'title' : screen;
-  render(ctx, world, audio, input);
+  render(ctx, world, audio, input, { settings, settingsOpen: false });
   announce('Screenshot scene: ' + shot);
 } else {
   world.screen = 'title';
@@ -164,7 +229,7 @@ let prevScreen = world.screen;
 
 function frame(now) {
   requestAnimationFrame(frame);
-  if (shotMode) { render(ctx, world, audio, input); return; }
+  if (shotMode) { render(ctx, world, audio, input, { settings, settingsOpen: false }); return; }
   if (!lastTime) lastTime = now;
   let dt = (now - lastTime) / 1000;
   lastTime = now;
@@ -192,7 +257,7 @@ function frame(now) {
     const label = world.screen === 'paused' ? '▶' : '⏸';
     if (pauseBtn.textContent !== label) pauseBtn.textContent = label;
   }
-  render(ctx, world, audio, input);
+  render(ctx, world, audio, input, { settings, settingsOpen });
   if (world.screen === 'play') {
     const m = world.mission();
     announce(`Day ${m.day}, delivery ${m.id} of 6 to ${m.to}. Score ${world.score}. Fuel ${Math.round(world.fuel)} percent.`);

@@ -16,7 +16,50 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 // Title panel bounds (1280x720 view space): the start screen's left-side
 // menu card. World labels, rings and hazards that fall behind it are hidden
 // while the title overlay is up, so nothing bleeds through or gets clipped.
-const TITLE_PANEL = { x: 56, y: 120, w: 560, h: 470 };
+// Tall warm-brown card (reference look): header, big title, one short line,
+// a glass showcase with the seaplane, and one pill button.
+const TITLE_PANEL = { x: 56, y: 120, w: 520, h: 470 };
+
+// Graphics quality for this frame ('high' | 'low'), set by render() from
+// the settings. Low drops glow (shadowBlur), particles and speed lines.
+let QUALITY = 'high';
+
+// Title-screen UI hit regions (VIEW coords). The SETTINGS text button opens
+// settings; the settings panel floats right of the title card, clear of the
+// gauges (which end at y 108) and of the throttle bar (top y 636).
+const GEAR_RECT = { x: 261, y: 540, w: 110, h: 36 };
+const SETTINGS_PANEL = { x: 600, y: 120, w: 340, h: 296 };
+const SETTINGS_CLOSE = { x: 892, y: 136, w: 32, h: 32 };
+const MUSIC_TOGGLE = { x: 800, y: 188, w: 92, h: 36 };
+const SFX_TOGGLE = { x: 800, y: 238, w: 92, h: 36 };
+const QUALITY_LOW = { x: 782, y: 288, w: 60, h: 36 };
+const QUALITY_HIGH = { x: 850, y: 288, w: 62, h: 36 };
+// The call-to-action pill rect, recorded each time drawTitle runs.
+let CTA_RECT = null;
+
+function inRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+
+// Hit-test a title-screen tap/click in VIEW coords. Returns 'gear',
+// 'settings-close', 'music', 'sfx', 'quality-low', 'quality-high',
+// 'cta', 'settings-panel', 'outside-settings', or null (plain canvas).
+export function titleHit(x, y, settingsOpen) {
+  if (settingsOpen) {
+    if (inRect(x, y, SETTINGS_CLOSE)) return 'settings-close';
+    if (inRect(x, y, MUSIC_TOGGLE)) return 'music';
+    if (inRect(x, y, SFX_TOGGLE)) return 'sfx';
+    if (inRect(x, y, QUALITY_LOW)) return 'quality-low';
+    if (inRect(x, y, QUALITY_HIGH)) return 'quality-high';
+    if (inRect(x, y, SETTINGS_PANEL)) return 'settings-panel';
+    if (inRect(x, y, GEAR_RECT)) return 'gear';
+    // The fly pill still works while settings are open: tapping it closes
+    // settings and starts the game (handled by the caller).
+    if (CTA_RECT && inRect(x, y, CTA_RECT)) return 'cta';
+    return 'outside-settings';
+  }
+  if (inRect(x, y, GEAR_RECT)) return 'gear';
+  if (CTA_RECT && inRect(x, y, CTA_RECT)) return 'cta';
+  return null;
+}
 
 // True when the point (with a margin for label width) sits behind the panel.
 function inTitlePanel(x, y, pad) {
@@ -284,7 +327,7 @@ function drawRing(ctx, world, ring, fuel, onTitle) {
   ctx.strokeStyle = fuel ? PALETTE.ringGreen : PALETTE.ringGold;
   ctx.lineWidth = (fuel ? 6 : 9) + d * 5;
   ctx.shadowColor = fuel ? PALETTE.ringGreen : PALETTE.ringGold;
-  ctx.shadowBlur = 18 * pulse;
+  ctx.shadowBlur = QUALITY === 'low' ? 0 : 18 * pulse;
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.stroke();
@@ -409,8 +452,8 @@ function drawPlane(ctx, world) {
   ctx.fillStyle = '#7dff9a';
   ctx.beginPath(); ctx.arc(148, -4, 5, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
-  // Speed lines at high speed.
-  if (world.speedLines > 0.55) {
+  // Speed lines at high speed (off on Low quality).
+  if (QUALITY !== 'low' && world.speedLines > 0.55) {
     ctx.strokeStyle = 'rgba(255,255,255,0.28)';
     ctx.lineWidth = 2;
     for (let i = 0; i < 10; i += 1) {
@@ -446,7 +489,7 @@ function gauge(ctx, x, y, r, label, value, max, unit, color) {
   ctx.strokeStyle = color;
   ctx.lineWidth = 3.5;
   ctx.shadowColor = color;
-  ctx.shadowBlur = 8;
+  ctx.shadowBlur = QUALITY === 'low' ? 0 : 8;
   ctx.beginPath();
   ctx.moveTo(x, y);
   ctx.lineTo(x + Math.cos(a) * (r - 8), y + Math.sin(a) * (r - 8));
@@ -647,48 +690,214 @@ function panel(ctx, x, y, w, h, alpha) {
   roundRect(ctx, x, y, w, h, 16); ctx.stroke();
 }
 
-function drawTitle(ctx, world, input) {
-  // Stronger scrim plus a near-opaque panel: with labels and rings hidden
-  // behind it, the card reads as a clean solid surface, never a window.
-  ctx.fillStyle = 'rgba(10, 14, 30, 0.42)';
+// The game's own seaplane, side-on, small, for the glass showcase on the
+// title card. Same cream/red/teal plane as in flight, drawn from scratch
+// here at showcase scale — no copied art, no images.
+function drawShowcasePlane(ctx, cx, cy, time) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(0.62, 0.62);
+  // Pontoons + struts.
+  ctx.fillStyle = PALETTE.planeTeal;
+  roundRect(ctx, -118, 58, 96, 16, 7); ctx.fill();
+  roundRect(ctx, 22, 58, 96, 16, 7); ctx.fill();
+  ctx.fillStyle = PALETTE.planeDark;
+  ctx.fillRect(-86, 34, 8, 26); ctx.fillRect(78, 34, 8, 26);
+  // Tail.
+  ctx.fillStyle = PALETTE.planeRed;
+  ctx.beginPath();
+  ctx.moveTo(-138, -6); ctx.lineTo(-172, -52); ctx.lineTo(-146, -56); ctx.lineTo(-118, -10);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = PALETTE.planeCream;
+  ctx.beginPath();
+  ctx.moveTo(-138, 6); ctx.lineTo(-168, 30); ctx.lineTo(-142, 34); ctx.lineTo(-118, 10);
+  ctx.closePath(); ctx.fill();
+  // Fuselage + red cheatline.
+  ctx.fillStyle = PALETTE.planeCream;
+  ctx.beginPath(); ctx.ellipse(0, 0, 148, 30, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = PALETTE.planeRed;
+  ctx.beginPath(); ctx.ellipse(0, 8, 146, 9, 0, 0, Math.PI); ctx.fill();
+  ctx.fillRect(-146, 4, 292, 7);
+  // Lit cockpit windows + registration.
+  ctx.fillStyle = '#ffd98a';
+  ctx.beginPath(); ctx.ellipse(96, -12, 22, 11, -0.12, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(66, -15, 18, 10, -0.08, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#2b2b33';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('PK-VSC', -30, -6);
+  // Upper wing.
+  ctx.fillStyle = PALETTE.planeRed;
+  ctx.beginPath();
+  ctx.moveTo(-52, -26); ctx.lineTo(52, -26); ctx.lineTo(30, -58); ctx.lineTo(-30, -58);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fillRect(-30, -58, 60, 6);
+  // Propeller: faint disc + two spinning blades.
+  ctx.save();
+  ctx.translate(152, 0);
+  ctx.fillStyle = 'rgba(43, 43, 51, 0.18)';
+  ctx.beginPath(); ctx.arc(0, 0, 52, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(time * 42);
+  ctx.fillStyle = 'rgba(43, 43, 51, 0.85)';
+  roundRect(ctx, -4, -52, 8, 104, 4); ctx.fill();
+  ctx.rotate(Math.PI / 2);
+  roundRect(ctx, -4, -52, 8, 104, 4); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#2b2b33';
+  ctx.beginPath(); ctx.arc(152, 0, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ff5a4a';
+  ctx.beginPath(); ctx.arc(-148, 0, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#7dff9a';
+  ctx.beginPath(); ctx.arc(148, -4, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawSettingsButton(ctx, r) {
+  ctx.save();
+  ctx.fillStyle = '#d9a06b';
+  roundRect(ctx, r.x, r.y, r.w, r.h, 18); ctx.fill();
+  ctx.fillStyle = '#4b2e23';
+  ctx.font = 'bold 14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('SETTINGS', r.x + r.w / 2, r.y + 23);
+  ctx.restore();
+}
+
+function drawTitle(ctx, world, input, ui) {
+  // Warm dark-brown card (reference look), fully opaque: a faint scrim
+  // keeps the map readable behind it, but nothing shows through the card.
+  // No info rows at all — no Pilot, Aircraft, Status, Last Flight, Cargo.
+  ctx.fillStyle = 'rgba(10, 14, 30, 0.10)';
   ctx.fillRect(0, 0, VIEW.width, VIEW.height);
-  panel(ctx, TITLE_PANEL.x, TITLE_PANEL.y, TITLE_PANEL.w, TITLE_PANEL.h, 0.94);
+  ctx.fillStyle = 'rgba(30, 16, 10, 0.35)';
+  roundRect(ctx, TITLE_PANEL.x + 3, TITLE_PANEL.y + 8, TITLE_PANEL.w, TITLE_PANEL.h, 24); ctx.fill();
+  ctx.fillStyle = '#4b2e23';
+  roundRect(ctx, TITLE_PANEL.x, TITLE_PANEL.y, TITLE_PANEL.w, TITLE_PANEL.h, 24); ctx.fill();
+  ctx.strokeStyle = '#7a4a34';
+  ctx.lineWidth = 3;
+  roundRect(ctx, TITLE_PANEL.x, TITLE_PANEL.y, TITLE_PANEL.w, TITLE_PANEL.h, 24); ctx.stroke();
+  drawSettingsButton(ctx, GEAR_RECT);
   ctx.save();
   ctx.textAlign = 'left';
-  ctx.fillStyle = PALETTE.ringGold;
-  ctx.font = 'bold 15px sans-serif';
+  ctx.fillStyle = '#e8cfae';
+  ctx.font = 'bold 14px sans-serif';
   ctx.fillText('MAKE.FUN  ·  BEST FLIGHT GAME', 84, 158);
-  ctx.fillStyle = PALETTE.hudText;
-  ctx.font = 'bold 52px sans-serif';
-  ctx.fillText('VOLCANO', 82, 214);
-  ctx.fillText('SKY COURIER', 82, 268);
-  ctx.fillStyle = PALETTE.hudDim;
+  ctx.fillStyle = '#f7dcb0';
+  ctx.font = 'bold 46px sans-serif';
+  ctx.fillText('VOLCANO', 82, 206);
+  ctx.fillText('SKY COURIER', 82, 252);
+  ctx.fillStyle = '#d9b48f';
   ctx.font = '17px sans-serif';
-  ctx.fillText('A bush seaplane mail run over a volcanic', 84, 300);
-  ctx.fillText('Indonesian archipelago at golden hour.', 84, 324);
-  ctx.fillStyle = PALETTE.hudText;
+  ctx.fillText('6 deliveries  ·  3 days', 84, 286);
+  // Glass showcase: dark case, shelf, the seaplane, glass shine.
+  const caseX = 84, caseY = 304, caseW = 464, caseH = 148;
+  ctx.fillStyle = '#33383f';
+  roundRect(ctx, caseX, caseY, caseW, caseH, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, caseX, caseY, caseW, caseH, 12); ctx.stroke();
+  // Little crate stack on the shelf, bottom-left of the case.
+  ctx.fillStyle = '#6b4a2e';
+  ctx.fillRect(108, 420, 44, 18);
+  ctx.fillStyle = '#7d5a38';
+  ctx.fillRect(112, 404, 36, 16);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+  ctx.fillRect(108, 436, 44, 3);
+  drawShowcasePlane(ctx, 316, 378, world.time);
+  // Glass shine, clipped to the case.
+  ctx.save();
+  roundRect(ctx, caseX, caseY, caseW, caseH, 12);
+  ctx.clip();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.10)';
+  ctx.beginPath();
+  ctx.moveTo(caseX + 120, caseY); ctx.lineTo(caseX + 220, caseY);
+  ctx.lineTo(caseX + 120, caseY + caseH); ctx.lineTo(caseX + 40, caseY + caseH);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  // One tan pill for the call to action.
+  const ctaText = input && input.isTouch ? '▶  TAP TO FLY' : '▶  PRESS ENTER OR CLICK TO FLY';
+  ctx.font = 'bold 18px sans-serif';
+  const pillW = Math.min(ctx.measureText(ctaText).width + 48, 464);
+  const pillX = TITLE_PANEL.x + (TITLE_PANEL.w - pillW) / 2;
+  CTA_RECT = { x: pillX, y: 474, w: pillW, h: 50 };
+  ctx.fillStyle = '#d9a06b';
+  roundRect(ctx, pillX, 474, pillW, 50, 25); ctx.fill();
+  ctx.fillStyle = '#4b2e23';
+  ctx.fillText(ctaText, pillX + (pillW - ctx.measureText(ctaText).width) / 2, 505);
+  ctx.restore();
+  if (ui && ui.settingsOpen) drawSettingsPanel(ctx, ui.settings);
+}
+
+function drawToggle(ctx, r, on, label) {
+  ctx.fillStyle = on ? '#7fa36b' : '#6b5a4e';
+  roundRect(ctx, r.x, r.y, r.w, r.h, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(247, 220, 176, 0.6)';
+  ctx.lineWidth = 1.5;
+  roundRect(ctx, r.x, r.y, r.w, r.h, 18); ctx.stroke();
+  const knobX = on ? r.x + r.w - 20 : r.x + 20;
+  ctx.fillStyle = '#fff9e8';
+  ctx.beginPath(); ctx.arc(knobX, r.y + r.h / 2, 13, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f7dcb0';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(on ? 'ON' : 'OFF', on ? r.x + 26 : r.x + r.w - 26, r.y + r.h / 2 + 4);
+  ctx.textAlign = 'left';
+}
+
+function drawSettingsPanel(ctx, settings) {
+  const p = SETTINGS_PANEL;
+  ctx.save();
+  ctx.fillStyle = 'rgba(30, 16, 10, 0.35)';
+  roundRect(ctx, p.x + 3, p.y + 6, p.w, p.h, 18); ctx.fill();
+  ctx.fillStyle = '#4b2e23';
+  roundRect(ctx, p.x, p.y, p.w, p.h, 18); ctx.fill();
+  ctx.strokeStyle = '#7a4a34';
+  ctx.lineWidth = 2.5;
+  roundRect(ctx, p.x, p.y, p.w, p.h, 18); ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f7dcb0';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('SETTINGS', p.x + 24, p.y + 38);
+  // X close button.
+  ctx.fillStyle = '#6b4232';
+  ctx.beginPath(); ctx.arc(SETTINGS_CLOSE.x + 16, SETTINGS_CLOSE.y + 16, 15, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#e8cfae';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(SETTINGS_CLOSE.x + 16, SETTINGS_CLOSE.y + 16, 15, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = '#e8cfae';
+  ctx.beginPath();
+  ctx.moveTo(SETTINGS_CLOSE.x + 10, SETTINGS_CLOSE.y + 10);
+  ctx.lineTo(SETTINGS_CLOSE.x + 22, SETTINGS_CLOSE.y + 22);
+  ctx.moveTo(SETTINGS_CLOSE.x + 22, SETTINGS_CLOSE.y + 10);
+  ctx.lineTo(SETTINGS_CLOSE.x + 10, SETTINGS_CLOSE.y + 22);
+  ctx.stroke();
+  // Rows.
+  ctx.fillStyle = '#e8cfae';
   ctx.font = 'bold 16px sans-serif';
-  ctx.fillText('▸ Fly the glowing rings', 84, 366);
-  ctx.fillText('▸ Pick up cargo, land it on the island strip', 84, 394);
-  ctx.fillText('▸ Mind fuel, ash clouds and the waves', 84, 422);
-  ctx.fillStyle = PALETTE.ringGold;
-  ctx.font = 'bold 19px sans-serif';
-  ctx.fillText(input && input.isTouch ? '▶  TAP TO FLY' : '▶  PRESS ENTER OR CLICK TO FLY', 84, 474);
-  ctx.fillStyle = PALETTE.hudDim;
-  ctx.font = '13px sans-serif';
-  ctx.fillText(
-    input && input.isTouch
-      ? 'Drag to steer · THR & CLIMB buttons on screen'
-      : 'A/D or ←/→ steer · W/S throttle · ↑/↓ climb & descend',
-    84, 506);
-  ctx.fillText(
-    input && input.isTouch
-      ? 'Tap ⏸ to pause · 🔊 to mute · best in landscape'
-      : 'Mouse steers too · P pause · M mute',
-    84, 528);
-  ctx.fillStyle = PALETTE.hudText;
-  ctx.font = 'bold 15px sans-serif';
-  ctx.fillText('6 DELIVERIES  ·  3 DAYS  ·  $500 PRIZE POOL', 84, 564);
+  ctx.fillText('Music', p.x + 24, MUSIC_TOGGLE.y + 24);
+  drawToggle(ctx, MUSIC_TOGGLE, !!settings.music);
+  ctx.fillText('Sound FX', p.x + 24, SFX_TOGGLE.y + 24);
+  drawToggle(ctx, SFX_TOGGLE, !!settings.sfx);
+  ctx.fillText('Quality', p.x + 24, QUALITY_LOW.y + 24);
+  const q = settings.quality || 'high';
+  const btn = (r, text, active) => {
+    ctx.fillStyle = active ? '#d9a06b' : 'rgba(255, 255, 255, 0.12)';
+    roundRect(ctx, r.x, r.y, r.w, r.h, 10); ctx.fill();
+    ctx.strokeStyle = active ? '#d9a06b' : 'rgba(247, 220, 176, 0.5)';
+    ctx.lineWidth = 1.5;
+    roundRect(ctx, r.x, r.y, r.w, r.h, 10); ctx.stroke();
+    ctx.fillStyle = active ? '#4b2e23' : '#f7dcb0';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, r.x + r.w / 2, r.y + 23);
+    ctx.textAlign = 'left';
+  };
+  btn(QUALITY_LOW, 'LOW', q === 'low');
+  btn(QUALITY_HIGH, 'HIGH', q === 'high');
+  ctx.fillStyle = '#b99a7a';
+  ctx.font = '12px sans-serif';
+  ctx.fillText('Applies instantly · saved on this device', p.x + 24, p.y + 268);
   ctx.restore();
 }
 
@@ -783,7 +992,8 @@ function drawComplete(ctx, world, input) {
   ctx.restore();
 }
 
-export function render(ctx, world, audio, input) {
+export function render(ctx, world, audio, input, ui) {
+  QUALITY = (ui && ui.settings && ui.settings.quality) || 'high';
   ctx.save();
   if (world.shake > 0) {
     ctx.translate((Math.random() - 0.5) * world.shake * 14, (Math.random() - 0.5) * world.shake * 14);
@@ -800,8 +1010,9 @@ export function render(ctx, world, audio, input) {
   for (const hz of world.hazards) drawHazard(ctx, world, hz, onTitle);
   for (const fr of world.fuelRings) drawRing(ctx, world, fr, true, onTitle);
   for (const ring of world.rings) drawRing(ctx, world, ring, false, onTitle);
-  // Particles behind the plane.
+  // Particles behind the plane (off on Low quality).
   for (const pt of world.particles) {
+    if (QUALITY === 'low') break;
     ctx.globalAlpha = Math.max(0, 1 - pt.t / pt.life);
     ctx.fillStyle = pt.color;
     ctx.beginPath();
@@ -811,7 +1022,7 @@ export function render(ctx, world, audio, input) {
   ctx.globalAlpha = 1;
   drawPlane(ctx, world);
   drawHud(ctx, world, audio, input);
-  if (world.screen === 'title') drawTitle(ctx, world, input);
+  if (world.screen === 'title') drawTitle(ctx, world, input, ui);
   else if (world.screen === 'paused') drawPaused(ctx, input);
   else if (world.screen === 'delivered') drawDelivered(ctx, world, input);
   else if (world.screen === 'over') drawOver(ctx, world, input);

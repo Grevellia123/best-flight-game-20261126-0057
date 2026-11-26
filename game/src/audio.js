@@ -39,6 +39,8 @@ const MUSIC_MELODY = {
 export function createAudio() {
   const api = {
     muted: false,
+    musicEnabled: true, // settings: background music on/off
+    sfxEnabled: true, // settings: sound-effect cues on/off
     ctx: null,
     engineOsc: null,
     engineGain: null,
@@ -78,7 +80,7 @@ export function createAudio() {
       if (this.master) this.master.gain.value = muted ? 0 : 0.5;
     },
     tone(freq, dur, type, vol, when = 0, slideTo = 0) {
-      if (!this.ctx || this.muted) return;
+      if (!this.ctx || this.muted || !this.sfxEnabled) return;
       try {
         const t0 = this.ctx.currentTime + when;
         const osc = this.ctx.createOscillator();
@@ -167,6 +169,12 @@ export function createAudio() {
     // nothing, so unmuting never dumps a backlog of notes at once.
     update() {
       if (!this.ctx || !this.musicOn || !this.musicGain) return;
+      if (!this.musicEnabled) {
+        // Music off: silence the music bus, keep the clock fresh.
+        this.musicGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.1);
+        this.nextNoteTime = this.ctx.currentTime + 0.1;
+        return;
+      }
       if (this.muted || this.ctx.state !== 'running') {
         this.nextNoteTime = this.ctx.currentTime + 0.1;
         return;
