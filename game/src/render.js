@@ -13,6 +13,21 @@ export const SCREEN_COMPLETE = 'complete';
 
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+// Viewport culling: skip drawing anything whose bounding circle sits fully
+// outside the visible frame (including the letterbox side bars, ox/oy).
+// The projection can push islands, rings and hazards far past the left or
+// right edge, and drawing them still costs fill / stroke / shadow work
+// even though no pixel lands on screen. The margin is generous on purpose:
+// a culled object must be one that cannot peek in, smoke plume and glow
+// included. Anything culled here also drops its deferred world label, so
+// an off-screen island no longer leaves its name clamped to the frame edge.
+function offscreen(x, y, r) {
+  const ox = VIEW.ox || 0;
+  const oy = VIEW.oy || 0;
+  return x + r < -ox - 8 || x - r > VIEW.width + ox + 8
+    || y + r < -oy - 8 || y - r > VIEW.height + oy + 8;
+}
+
 // Title panel bounds (1280x720 view space): the start screen's left-side
 // menu card. World labels, rings and hazards that fall behind it are hidden
 // while the title overlay is up, so nothing bleeds through or gets clipped.
@@ -311,6 +326,8 @@ function drawIsland(ctx, world, isl, onTitle, labels) {
   const x = laneX(world, isl.x, isl.z);
   const y = groundY(isl.z);
   const s = scaleAt(isl.z) * isl.size;
+  // Viewport culling: cone + smoke plume span ~260*s from (x, y - 100*s).
+  if (offscreen(x, y - 100 * s, 260 * s)) return;
   ctx.save();
   ctx.globalAlpha = 0.55 + d * 0.45;
   if (isl.kind === 'volcano') {
@@ -420,6 +437,8 @@ function drawStrip(ctx, world, onTitle, stripOverride, labelOverride, labels) {
   const cx = laneX(world, 0, strip.z);
   const y = groundY(strip.z);
   const s = scaleAt(strip.z);
+  // Viewport culling: strip + its label span ~120*s from (cx, y - 45*s).
+  if (offscreen(cx, y - 45 * s, 120 * s)) return;
   // Water runway: pale strip with centre dashes and edge lights, narrowing
   // toward the horizon like a real perspective runway.
   ctx.save();
@@ -469,6 +488,8 @@ function drawRing(ctx, world, ring, fuel, onTitle) {
   // Wide enough at the camera that the plane (296 px long) fits through
   // the hole: a hit now looks like flying through the ring.
   const r = (30 + d * 150) * (fuel ? 0.8 : 1);
+  // Viewport culling: ring + stroke + shadow glow span r + 28.
+  if (offscreen(x, y, r + 28)) return;
   // On the title screen, rings behind the menu panel are hidden outright —
   // a glowing arc bleeding through the panel edge reads as a defect.
   if (onTitle && circleHitsTitlePanel(x, y, r)) return;
@@ -504,6 +525,8 @@ function drawHazard(ctx, world, hz, onTitle, labels) {
   const x = laneXAt(world, hz.x, d);
   const y = airYAt(world, hz.alt, d);
   const r = (30 + d * 130) * hz.r * 4;
+  // Viewport culling: the ash puffs reach ~1.31*r from the centre.
+  if (offscreen(x, y, r * 1.35 + 8)) return;
   // Same as rings: hidden behind the title panel, label included.
   if (onTitle && circleHitsTitlePanel(x, y, r)) return;
   ctx.save();
@@ -1233,17 +1256,23 @@ export function render(ctx, world, audio, input, ui) {
   // Ring/hazard screen circles for the label layer: labels must stay off
   // them, so they are computed before anything is drawn.
   const circles = [];
+  // Off-screen rings / hazards are left out here too: they are not drawn,
+  // so they must not block a label from its place either.
   for (const o of world.rings) {
-    if (!o.hit && ringDepth(o.z) > 0.02) circles.push(ringCircle(world, o, false));
+    if (o.hit || ringDepth(o.z) <= 0.02) continue;
+    const c = ringCircle(world, o, false);
+    if (!offscreen(c.x, c.y, c.r + 28)) circles.push(c);
   }
   for (const o of world.fuelRings) {
-    if (!o.taken && ringDepth(o.z) > 0.02) circles.push(ringCircle(world, o, true));
+    if (o.taken || ringDepth(o.z) <= 0.02) continue;
+    const c = ringCircle(world, o, true);
+    if (!offscreen(c.x, c.y, c.r + 28)) circles.push(c);
   }
   for (const hz of world.hazards) {
-    if (!hz.hit && ringDepth(hz.z) > 0.02) {
-      const d = ringDepth(hz.z);
-      circles.push({ x: laneXAt(world, hz.x, d), y: airYAt(world, hz.alt, d), r: (30 + d * 130) * hz.r * 4 });
-    }
+    if (hz.hit || ringDepth(hz.z) <= 0.02) continue;
+    const d = ringDepth(hz.z);
+    const c = { x: laneXAt(world, hz.x, d), y: airYAt(world, hz.alt, d), r: (30 + d * 130) * hz.r * 4 };
+    if (!offscreen(c.x, c.y, c.r * 1.35 + 8)) circles.push(c);
   }
   const labels = makeLabelLayer(ctx, circles, [planeBox(world)]);
   // Islands far to near so near ones overlap far ones.
@@ -1271,6 +1300,8 @@ export function render(ctx, world, audio, input, ui) {
   // Particles behind the plane (off on Low quality).
   for (const pt of world.particles) {
     if (QUALITY === 'low') break;
+    // Viewport culling: spray that has drifted off frame is not drawn.
+    if (offscreen(pt.x, pt.y, pt.size + 2)) continue;
     ctx.globalAlpha = Math.max(0, 1 - pt.t / pt.life);
     ctx.fillStyle = pt.color;
     ctx.beginPath();
